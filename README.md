@@ -2,7 +2,7 @@
   <img src="docs/assets/logo.png" alt="FAMQCORE" width="720">
 
   <h1>FAMQCORE Bot</h1>
-  <p><strong>Discord-бот для заявок, рекрутинга, AFK-статусов и модерации игровых сообществ.</strong></p>
+  <p><strong>Discord-бот для автоматизации процессов.И для упрощенния работы владельцев семей на Majestic Rp или GTA 5 Rp</strong></p>
 
   [![CI](https://github.com/famqcore/Discordbot/actions/workflows/tests.yml/badge.svg)](https://github.com/famqcore/Discordbot/actions/workflows/tests.yml)
   [![Python 3.10+](https://img.shields.io/badge/Python-3.10%2B-3776AB?logo=python&logoColor=white)](https://www.python.org/)
