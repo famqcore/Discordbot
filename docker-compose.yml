@@ -1,0 +1,14 @@
+services:
+  bot:
+    build: .
+    container_name: regent-bot
+    restart: unless-stopped
+    env_file:
+      - src/app/.env
+    volumes:
+      - bot_data:/app/database
+      - bot_logs:/app/logs
+
+volumes:
+  bot_data:
+  bot_logs:

@@ -1,0 +1,5 @@
+blank_issues_enabled: true
+contact_links:
+  - name: 💬 Вопрос автору
+    url: https://t.me/yyangov
+    about: Общие вопросы, не связанные с багами — в Telegram.

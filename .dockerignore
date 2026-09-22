@@ -1,0 +1,16 @@
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+*.db
+*.sqlite3
+.env
+.venv/
+venv/
+
+
+.git/
+.gitignore
+README.md
+LICENSE

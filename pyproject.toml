@@ -1,0 +1,16 @@
+[tool.ruff]
+src = ["src/app"]
+target-version = "py310"
+line-length = 100
+
+[tool.ruff.lint]
+# Поведенческие правила (DTZ, SIM117, BLE001) подключаем по мере
+# закрытия соответствующих issue — иначе CI краснеет на известном.
+select = ["E", "W", "F", "I", "UP", "B", "C4"]
+ignore = ["E501"]
+
+[tool.ruff.lint.isort]
+combine-as-imports = true
+
+[tool.ruff.format]
+quote-style = "double"
