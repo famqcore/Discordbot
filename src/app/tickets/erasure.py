@@ -18,6 +18,8 @@ import discord
 import config
 from afk.models import remove_afk_nickname
 from database import afk_db, tickets_db
+from database.schema import ACTIVE_STATUSES
+from utils.errors import log_event
 from utils.logcenter import LOG_KEY_AUDIT, delete_log_messages, send_to_log
 from utils.logger import logger
 
@@ -26,7 +28,7 @@ async def _delete_open_ticket_channels(guild, tickets) -> int:
     """Удаляет каналы открытых тикетов пользователя. Возвращает число удалённых."""
     removed = 0
     for ticket in tickets:
-        if ticket["status"] != "open":
+        if ticket["status"] not in ACTIVE_STATUSES:
             continue
         channel = guild.get_channel(ticket["channel_id"])
         if channel is None:
@@ -34,8 +36,13 @@ async def _delete_open_ticket_channels(guild, tickets) -> int:
         try:
             await channel.delete(reason="Удаление персональных данных заявителя")
             removed += 1
-        except Exception as e:
-            logger.error(f"erasure: не удалось удалить канал тикета {ticket['channel_id']}: {e}")
+        except discord.NotFound:
+            removed += 1  # канала уже нет — цель достигнута
+        except (discord.Forbidden, discord.HTTPException) as error:
+            logger.exception(
+                f"erasure outcome=channel_delete_failed channel_id={ticket['channel_id']} "
+                f"error_type={type(error).__name__}"
+            )
     return removed
 
 
@@ -62,9 +69,10 @@ async def erase_user_data(guild, member) -> dict[str, int]:
     # AFK: ник восстанавливается до удаления записи, пока известен исходный
     afk_row = afk_db.get_afk_user(user_id, guild.id)
     original_nick = afk_row["original_nick"] if afk_row else None
+    nick_applied = bool(afk_row["nick_applied"]) if afk_row else False
     afk_counts = afk_db.delete_user_data(user_id, guild.id)
     if afk_row is not None:
-        await remove_afk_nickname(member, original_nick)
+        await remove_afk_nickname(member, original_nick, nick_applied=nick_applied)
 
     return {
         "tickets": anonymized,
@@ -88,7 +96,13 @@ async def audit_erasure(guild, admin, member, counts: dict[str, int]) -> None:
         inline=False,
     )
     await send_to_log(guild, LOG_KEY_AUDIT, embed=embed)
-    logger.info(
-        f"erasure: администратор {admin.id} удалил данные пользователя {member.id} "
-        f"на сервере {getattr(guild, 'id', guild)}: {counts}"
+    log_event(
+        "erasure",
+        guild_id=getattr(guild, "id", None),
+        admin_id=admin.id,
+        subject_id=member.id,
+        tickets=counts["tickets"],
+        channels=counts["channels"],
+        log_messages=counts["log_messages"],
+        afk_users=counts["afk_users"],
     )

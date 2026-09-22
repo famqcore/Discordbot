@@ -1,48 +1,51 @@
-"""Issue #6: фоновая ретенция — заявки и транскрипты старше срока хранения."""
+"""Ретенция заявок: удаление данных старше срока хранения (issues #6, #21)."""
 
-import os
-import tempfile
 import unittest
-from datetime import datetime, timedelta
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, patch
+
+import discord
+from discord.ext import commands
 
 import config
-from database import migrate_schema, tickets_db
-from tickets import retention
-from tickets.retention import purge_expired_once, start_retention_loop
+from database import tickets_db
+from database.db import run
+from database.schema import STATUS_ACCEPTED
+from tests.support import (
+    FakeChannel,
+    FakeGuild,
+    http_exception,
+    make_forbidden,
+    use_temp_database,
+)
+from tickets.retention import (
+    TicketRetentionCog,
+    purge_expired_once,
+    setup_retention_loop,
+)
+from utils import clock
 
 
-def days_ago_iso(days):
-    return (datetime.now() - timedelta(days=days)).isoformat()
+def days_ago_iso(days: int) -> str:
+    return clock.to_db(clock.shift(clock.utcnow(), days=-days))
 
 
-class RetentionDBTestCase(unittest.TestCase):
+class PurgeExpiredTestCase(unittest.IsolatedAsyncioTestCase):
+    """Один проход ретенции."""
+
     def setUp(self):
-        self.temp = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
-        self.temp.close()
-        self._old_db_path = config.DB_PATH
-        config.DB_PATH = self.temp.name
-        migrate_schema()
+        use_temp_database(self)
+        self.guild = FakeGuild(guild_id=7)
+        self.bot = self._make_bot(self.guild)
 
-    def tearDown(self):
-        config.DB_PATH = self._old_db_path
-        try:
-            os.unlink(self.temp.name)
-        except OSError:
-            pass
+    @staticmethod
+    def _make_bot(guild):
+        class Bot:
+            def get_guild(self, guild_id):
+                return guild if guild_id == guild.id else None
 
+        return Bot()
 
-def make_bot(guild_id=7):
-    guild = MagicMock()
-    guild.id = guild_id
-    guild.get_channel = MagicMock(return_value=None)
-    bot = MagicMock()
-    bot.get_guild = MagicMock(side_effect=lambda gid: guild if gid == guild_id else None)
-    return bot, guild
-
-
-class TestPurgeExpiredOnce(RetentionDBTestCase, unittest.IsolatedAsyncioTestCase):
-    def _save_closed(self, channel_id, closed_days, guild_id=7):
+    def _save_closed(self, channel_id: int, closed_days: int, guild_id: int = 7) -> None:
         tickets_db.save_ticket(
             channel_id,
             42,
@@ -50,146 +53,225 @@ class TestPurgeExpiredOnce(RetentionDBTestCase, unittest.IsolatedAsyncioTestCase
             "RP ЗАЯВКА",
             "rp",
             "{}",
-            days_ago_iso(closed_days + 1),
+            created_at=days_ago_iso(closed_days + 1),
             guild_id=guild_id,
         )
-        tickets_db.update_ticket_status(channel_id, "accepted", 9, "ок")
-        tickets_db.get_ticket(channel_id)
-        # закрываем с нужной датой вручную: update_ticket_status ставит «сейчас»
-        from database.db import get_db
-
-        conn = get_db()
-        try:
-            conn.execute(
+        tickets_db.update_ticket_status(channel_id, STATUS_ACCEPTED, 9, "ок", guild_id=guild_id)
+        # update_ticket_status ставит «сейчас» — сдвигаем дату закрытия в прошлое
+        closed_at = days_ago_iso(closed_days)
+        run(
+            lambda conn: conn.execute(
                 "UPDATE tickets SET closed_at = ? WHERE channel_id = ?",
-                (days_ago_iso(closed_days), channel_id),
-            )
-            conn.commit()
-        finally:
-            conn.close()
+                (closed_at, channel_id),
+            ),
+            write=True,
+        )
 
-    async def test_old_closed_ticket_purged_with_logs(self):
-        self._save_closed(100, closed_days=config.TICKET_RETENTION_DAYS + 10)
-        tickets_db.add_log_message_id(100, 900, 500)
-        bot, _ = make_bot()
-
-        with patch("tickets.retention.delete_log_messages", new_callable=AsyncMock) as mock_logs:
-            with patch("tickets.retention.send_to_log", new_callable=AsyncMock):
-                purged = await purge_expired_once(bot)
-
-        self.assertEqual(purged, 1)
-        self.assertIsNone(tickets_db.get_ticket(100))
-        mock_logs.assert_awaited_once()
-        self.assertEqual(mock_logs.call_args.args[1], [(900, 500)])
-
-    async def test_recent_closed_ticket_kept(self):
-        self._save_closed(100, closed_days=config.TICKET_RETENTION_DAYS - 10)
-        bot, _ = make_bot()
-
-        with patch("tickets.retention.send_to_log", new_callable=AsyncMock):
-            purged = await purge_expired_once(bot)
-
-        self.assertEqual(purged, 0)
-        self.assertIsNotNone(tickets_db.get_ticket(100))
-
-    async def test_abandoned_open_ticket_channel_deleted_and_row_purged(self):
+    def _save_open(self, channel_id: int, created_days: int, guild_id: int = 7) -> None:
         tickets_db.save_ticket(
-            100,
+            channel_id,
             42,
             "vasya",
             "RP ЗАЯВКА",
             "rp",
             "{}",
-            days_ago_iso(config.TICKET_RETENTION_DAYS + 30),
-            guild_id=7,
+            created_at=days_ago_iso(created_days),
+            guild_id=guild_id,
         )
-        channel = MagicMock()
-        channel.delete = AsyncMock()
-        bot, guild = make_bot()
-        guild.get_channel = MagicMock(return_value=channel)
+
+    async def test_old_closed_ticket_purged_with_logs(self):
+        self._save_closed(100, closed_days=config.TICKET_RETENTION_DAYS + 10)
+        tickets_db.add_log_message_id(100, 900, 500)
+
+        with patch("tickets.retention.delete_log_messages", new_callable=AsyncMock) as mock_logs:
+            with patch("tickets.retention.send_to_log", new_callable=AsyncMock):
+                purged = await purge_expired_once(self.bot)
+
+        self.assertEqual(purged, 1)
+        self.assertIsNone(tickets_db.get_ticket(100))
+        mock_logs.assert_awaited_once()
+        self.assertEqual(mock_logs.await_args.args[1], [(900, 500)])
+
+    async def test_recent_closed_ticket_kept(self):
+        self._save_closed(100, closed_days=config.TICKET_RETENTION_DAYS - 10)
 
         with patch("tickets.retention.send_to_log", new_callable=AsyncMock):
-            purged = await purge_expired_once(bot)
+            purged = await purge_expired_once(self.bot)
+
+        self.assertEqual(purged, 0)
+        self.assertIsNotNone(tickets_db.get_ticket(100))
+
+    async def test_abandoned_open_ticket_channel_deleted_and_row_purged(self):
+        self._save_open(100, created_days=config.TICKET_RETENTION_DAYS + 30)
+        channel = FakeChannel(channel_id=100, guild=self.guild)
+        self.guild.add_channel(channel)
+
+        with patch("tickets.retention.send_to_log", new_callable=AsyncMock):
+            purged = await purge_expired_once(self.bot)
 
         self.assertEqual(purged, 1)
         channel.delete.assert_awaited_once()
         self.assertIsNone(tickets_db.get_ticket(100))
 
     async def test_orphan_open_ticket_without_channel_purged(self):
-        tickets_db.save_ticket(
-            100,
-            42,
-            "vasya",
-            "RP ЗАЯВКА",
-            "rp",
-            "{}",
-            days_ago_iso(config.TICKET_RETENTION_DAYS + 30),
-            guild_id=7,
-        )
-        bot, guild = make_bot()  # guild.get_channel вернёт None — канала давно нет
+        self._save_open(100, created_days=config.TICKET_RETENTION_DAYS + 30)
 
         with patch("tickets.retention.send_to_log", new_callable=AsyncMock):
-            purged = await purge_expired_once(bot)
+            purged = await purge_expired_once(self.bot)
 
         self.assertEqual(purged, 1)
         self.assertIsNone(tickets_db.get_ticket(100))
 
     async def test_fresh_open_ticket_kept(self):
-        tickets_db.save_ticket(
-            100, 42, "vasya", "RP ЗАЯВКА", "rp", "{}", days_ago_iso(3), guild_id=7
-        )
-        bot, _ = make_bot()
+        self._save_open(100, created_days=3)
 
         with patch("tickets.retention.send_to_log", new_callable=AsyncMock):
-            purged = await purge_expired_once(bot)
+            purged = await purge_expired_once(self.bot)
 
         self.assertEqual(purged, 0)
         self.assertIsNotNone(tickets_db.get_ticket(100))
 
     async def test_aggregated_stats_not_deleted(self):
         self._save_closed(100, closed_days=config.TICKET_RETENTION_DAYS + 10)
-        bot, _ = make_bot()
 
         with patch("tickets.retention.delete_log_messages", new_callable=AsyncMock):
             with patch("tickets.retention.send_to_log", new_callable=AsyncMock):
-                await purge_expired_once(bot)
+                await purge_expired_once(self.bot)
 
         stats = tickets_db.get_stats(7)
-        # записи тикетов удалены ретенцией — сводные счётчики по тикетам
-        # отражают окно хранения (документировано в docs/privacy.md)
+        # персональные записи удалены, обезличенная дневная агрегация остаётся
         self.assertEqual(stats["accepted"], 0)
-        # дневная агрегация без персональных данных остаётся
         self.assertTrue(stats["weekly"])
         self.assertEqual(stats["weekly"][0]["accepted"], 1)
 
     async def test_audit_message_sent_after_purge(self):
         self._save_closed(100, closed_days=config.TICKET_RETENTION_DAYS + 10)
-        bot, _ = make_bot()
 
-        with patch("tickets.retention.send_to_log", new_callable=AsyncMock) as mock_log:
-            await purge_expired_once(bot)
+        with patch("tickets.retention.delete_log_messages", new_callable=AsyncMock):
+            with patch("tickets.retention.send_to_log", new_callable=AsyncMock) as mock_log:
+                await purge_expired_once(self.bot)
 
         mock_log.assert_awaited_once()
-        embed = mock_log.call_args.kwargs["embed"]
+        embed = mock_log.await_args.kwargs["embed"]
         self.assertEqual(embed.title, config.RETENTION_AUDIT_TITLE)
 
+    async def test_no_audit_message_when_nothing_purged(self):
+        self._save_open(100, created_days=1)
 
-class TestRetentionLoop(unittest.TestCase):
-    def tearDown(self):
-        retention._started = False
+        with patch("tickets.retention.send_to_log", new_callable=AsyncMock) as mock_log:
+            purged = await purge_expired_once(self.bot)
 
-    def test_loop_starts_once(self):
-        retention._started = False
-        bot = MagicMock()
+        self.assertEqual(purged, 0)
+        mock_log.assert_not_awaited()
+
+    async def test_channel_delete_forbidden_keeps_row(self):
+        """Нет прав на удаление канала — запись остаётся до следующего прохода."""
+        self._save_open(100, created_days=config.TICKET_RETENTION_DAYS + 30)
+        channel = FakeChannel(channel_id=100, guild=self.guild)
+        channel.delete = AsyncMock(side_effect=make_forbidden())
+        self.guild.add_channel(channel)
+
+        with patch("tickets.retention.send_to_log", new_callable=AsyncMock):
+            purged = await purge_expired_once(self.bot)
+
+        self.assertEqual(purged, 0)
+        self.assertIsNotNone(tickets_db.get_ticket(100))
+
+    async def test_log_deletion_failure_keeps_row(self):
+        self._save_closed(100, closed_days=config.TICKET_RETENTION_DAYS + 10)
+        tickets_db.add_log_message_id(100, 900, 500)
+
+        with patch(
+            "tickets.retention.delete_log_messages",
+            new_callable=AsyncMock,
+            side_effect=http_exception(),
+        ):
+            with patch("tickets.retention.send_to_log", new_callable=AsyncMock):
+                purged = await purge_expired_once(self.bot)
+
+        self.assertEqual(purged, 0)
+        self.assertIsNotNone(tickets_db.get_ticket(100))
+
+    async def test_one_failure_does_not_stop_others(self):
+        self._save_closed(100, closed_days=config.TICKET_RETENTION_DAYS + 10)
+        self._save_closed(101, closed_days=config.TICKET_RETENTION_DAYS + 11)
+        tickets_db.add_log_message_id(100, 900, 500)
+        tickets_db.add_log_message_id(101, 901, 501)
+
+        calls = {"n": 0}
+
+        async def flaky(_guild, _refs):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise http_exception()
+
+        with patch("tickets.retention.delete_log_messages", side_effect=flaky):
+            with patch("tickets.retention.send_to_log", new_callable=AsyncMock):
+                purged = await purge_expired_once(self.bot)
+
+        self.assertEqual(purged, 1)
+
+    async def test_unknown_guild_row_still_purged(self):
+        """Бота выгнали с сервера: запись всё равно должна уйти по сроку."""
+        self._save_closed(100, closed_days=config.TICKET_RETENTION_DAYS + 10, guild_id=999)
+
+        with patch("tickets.retention.send_to_log", new_callable=AsyncMock):
+            purged = await purge_expired_once(self.bot)
+
+        self.assertEqual(purged, 1)
+        self.assertIsNone(tickets_db.get_ticket(100))
+
+
+class RetentionCogLifecycleTestCase(unittest.IsolatedAsyncioTestCase):
+    """Issue #21: цикл принадлежит Cog и отменяется вместе с ним."""
+
+    async def asyncSetUp(self):
+        self.bot = self._make_bot()
+
+    @staticmethod
+    async def _settle() -> None:
+        import asyncio
+
+        for _ in range(3):
+            await asyncio.sleep(0)
+
+    def _make_bot(self) -> commands.Bot:
+        bot = commands.Bot(command_prefix="!", intents=discord.Intents.none())
         bot.wait_until_ready = AsyncMock()
+        self.addAsyncCleanup(bot.close)
+        return bot
 
-        with patch("tickets.retention.tasks.loop") as mock_loop:
-            decorator = MagicMock()
-            mock_loop.return_value = decorator
-            start_retention_loop(bot)
-            start_retention_loop(bot)  # повторный запуск игнорируется
+    async def test_setup_starts_single_task(self):
+        cog = await setup_retention_loop(self.bot)
 
-        mock_loop.assert_called_once()
+        self.assertIsInstance(cog, TicketRetentionCog)
+        self.assertTrue(cog.retention_loop.is_running())
+        self.assertEqual(cog.retention_loop.seconds, config.RETENTION_CHECK_SECONDS)
+
+    async def test_setup_is_idempotent(self):
+        first = await setup_retention_loop(self.bot)
+        second = await setup_retention_loop(self.bot)
+
+        self.assertIs(first, second)
+
+    async def test_cog_unload_cancels_task(self):
+        cog = await setup_retention_loop(self.bot)
+
+        await self.bot.remove_cog("TicketRetentionCog")
+        await self._settle()
+
+        self.assertFalse(cog.retention_loop.is_running())
+
+    async def test_two_instances_are_independent(self):
+        other = self._make_bot()
+        first = await setup_retention_loop(self.bot)
+        second = await setup_retention_loop(other)
+
+        await self.bot.remove_cog("TicketRetentionCog")
+        await self._settle()
+
+        self.assertFalse(first.retention_loop.is_running())
+        self.assertTrue(second.retention_loop.is_running())
 
 
 if __name__ == "__main__":

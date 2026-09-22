@@ -1,100 +1,281 @@
-from datetime import datetime
+"""Данные AFK: активные статусы, кулдаун автоответов, статистика.
 
-from .db import get_db
-from .migrations import migrate_schema
+Ключевые инварианты (issues #8, #10, #11):
+
+- повторная установка AFK не перезаписывает `afk_since` и `original_nick`
+  активной сессии: исходный ник обязан пережить любое число обновлений
+  причины и времени;
+- снятие AFK — одна транзакция «прочитать, удалить, обновить статистику»:
+  из двух конкурентных снятий снимок получает только победившая операция,
+  поэтому длительность и рекорд не удваиваются;
+- кулдаун автоответа резервируется условным upsert до отправки сообщения,
+  а при ошибке отправки освобождается — два параллельных упоминания дают
+  максимум один автоответ.
+"""
+
+from __future__ import annotations
+
+import sqlite3
+from datetime import timedelta
+
+from utils import clock
+
+from . import db
 
 
-def init_afk_db():
+def init_afk_db() -> None:
+    from .migrations import migrate_schema
+
     migrate_schema()
+
+
+# ---------------------------------------------------------------------------
+# Активные AFK
+# ---------------------------------------------------------------------------
 
 
 def set_afk(
     user_id: int,
     guild_id: int,
     reason: str,
-    afk_since: str,
+    afk_since: str | None = None,
     estimated_return: str | None = None,
     original_nick: str | None = None,
-):
-    conn = get_db()
-    try:
-        c = conn.cursor()
-        c.execute(
+    nick_applied: bool = False,
+) -> dict[str, bool]:
+    """Ставит или обновляет AFK одной транзакцией.
+
+    Возвращает ``{"created": bool, "updated": bool}``: `created` — началась
+    новая сессия (её считает статистика), `updated` — обновлены причина и
+    время возврата уже идущей сессии. Старт сессии и исходный ник у активной
+    записи сохраняются без изменений.
+    """
+    started = afk_since or clock.to_db()
+
+    def operation(conn: sqlite3.Connection) -> dict[str, bool]:
+        existing = conn.execute(
+            "SELECT afk_since FROM afk_users WHERE user_id = ? AND guild_id = ?",
+            (user_id, guild_id),
+        ).fetchone()
+
+        if existing is None:
+            conn.execute(
+                """
+                INSERT INTO afk_users
+                    (user_id, guild_id, afk_reason, afk_since, estimated_return,
+                     original_nick, nick_applied, is_afk)
+                VALUES (?, ?, ?, ?, ?, ?, ?, 1)
+                """,
+                (
+                    user_id,
+                    guild_id,
+                    reason,
+                    started,
+                    estimated_return,
+                    original_nick,
+                    1 if nick_applied else 0,
+                ),
+            )
+            conn.execute(
+                """
+                INSERT INTO afk_stats
+                    (guild_id, user_id, total_afk_count, total_afk_seconds, longest_afk_seconds)
+                VALUES (?, ?, 1, 0, 0)
+                ON CONFLICT(guild_id, user_id) DO UPDATE SET
+                    total_afk_count = total_afk_count + 1
+                """,
+                (guild_id, user_id),
+            )
+            return {"created": True, "updated": False}
+
+        conn.execute(
             """
-            INSERT INTO afk_users
-                (user_id, guild_id, afk_reason, afk_since, estimated_return, original_nick, is_afk)
-            VALUES (?, ?, ?, ?, ?, ?, 1)
-            ON CONFLICT(user_id, guild_id) DO UPDATE SET
-                afk_reason = excluded.afk_reason,
-                afk_since = excluded.afk_since,
-                estimated_return = excluded.estimated_return,
-                original_nick = excluded.original_nick,
-                is_afk = 1
-        """,
-            (user_id, guild_id, reason, afk_since, estimated_return, original_nick),
+            UPDATE afk_users
+            SET afk_reason = ?, estimated_return = ?, is_afk = 1
+            WHERE user_id = ? AND guild_id = ?
+            """,
+            (reason, estimated_return, user_id, guild_id),
         )
-        conn.commit()
-    finally:
-        conn.close()
+        return {"created": False, "updated": True}
+
+    return db.run(operation, write=True)
+
+
+def mark_nick_applied(user_id: int, guild_id: int, applied: bool = True) -> bool:
+    """Отмечает, что префикс ника поставил бот (владение префиксом)."""
+
+    def operation(conn: sqlite3.Connection) -> bool:
+        cursor = conn.execute(
+            "UPDATE afk_users SET nick_applied = ? WHERE user_id = ? AND guild_id = ?",
+            (1 if applied else 0, user_id, guild_id),
+        )
+        return cursor.rowcount > 0
+
+    return db.run(operation, write=True)
+
+
+def take_afk(user_id: int, guild_id: int) -> dict | None:
+    """Compare-and-delete: снимает AFK и обновляет статистику одной транзакцией.
+
+    Возвращает снимок снятой сессии (включая вычисленную длительность) или
+    None, если записи уже нет — значит, её сняла конкурирующая операция и
+    статистику обновила именно она.
+    """
+
+    def operation(conn: sqlite3.Connection) -> dict | None:
+        row = conn.execute(
+            "SELECT * FROM afk_users WHERE user_id = ? AND guild_id = ?",
+            (user_id, guild_id),
+        ).fetchone()
+        if row is None:
+            return None
+
+        cursor = conn.execute(
+            "DELETE FROM afk_users WHERE user_id = ? AND guild_id = ?",
+            (user_id, guild_id),
+        )
+        if cursor.rowcount == 0:
+            return None
+
+        snapshot = dict(row)
+        duration = clock.seconds_between(clock.parse_db(snapshot.get("afk_since")))
+        snapshot["duration_seconds"] = duration
+
+        conn.execute(
+            """
+            INSERT INTO afk_stats
+                (guild_id, user_id, total_afk_count, total_afk_seconds, longest_afk_seconds)
+            VALUES (?, ?, 0, ?, ?)
+            ON CONFLICT(guild_id, user_id) DO UPDATE SET
+                total_afk_seconds = total_afk_seconds + excluded.total_afk_seconds,
+                longest_afk_seconds = MAX(longest_afk_seconds, excluded.longest_afk_seconds)
+            """,
+            (guild_id, user_id, duration, duration),
+        )
+        return snapshot
+
+    return db.run(operation, write=True)
 
 
 def remove_afk(user_id: int, guild_id: int) -> bool:
-    conn = get_db()
-    try:
-        c = conn.cursor()
-        c.execute("DELETE FROM afk_users WHERE user_id = ? AND guild_id = ?", (user_id, guild_id))
-        deleted = c.rowcount > 0
-        conn.commit()
-        return deleted
-    finally:
-        conn.close()
+    """Удаляет запись AFK без обновления статистики (служебная операция)."""
 
-
-def get_afk_user(user_id: int, guild_id: int):
-    conn = get_db()
-    try:
-        c = conn.cursor()
-        c.execute("SELECT * FROM afk_users WHERE user_id = ? AND guild_id = ?", (user_id, guild_id))
-        return c.fetchone()
-    finally:
-        conn.close()
-
-
-def get_all_afk(guild_id: int) -> list:
-    conn = get_db()
-    try:
-        c = conn.cursor()
-        c.execute(
-            """
-            SELECT * FROM afk_users WHERE guild_id = ? AND is_afk = 1 ORDER BY afk_since ASC
-        """,
-            (guild_id,),
+    def operation(conn: sqlite3.Connection) -> bool:
+        cursor = conn.execute(
+            "DELETE FROM afk_users WHERE user_id = ? AND guild_id = ?",
+            (user_id, guild_id),
         )
-        return c.fetchall()
-    finally:
-        conn.close()
+        return cursor.rowcount > 0
+
+    return db.run(operation, write=True)
 
 
-def get_expired_afk(guild_id: int, now_iso: str) -> list:
+def get_afk_user(user_id: int, guild_id: int) -> sqlite3.Row | None:
+    return db.run(
+        lambda conn: conn.execute(
+            "SELECT * FROM afk_users WHERE user_id = ? AND guild_id = ?",
+            (user_id, guild_id),
+        ).fetchone()
+    )
+
+
+def get_afk_users(guild_id: int, user_ids) -> list[sqlite3.Row]:
+    """AFK-записи для набора участников одним запросом (автоответ)."""
+    ids = [int(user_id) for user_id in dict.fromkeys(user_ids)]
+    if not ids:
+        return []
+    placeholders = ", ".join("?" for _ in ids)
+    return db.run(
+        lambda conn: conn.execute(
+            f"""
+            SELECT * FROM afk_users
+            WHERE guild_id = ? AND is_afk = 1 AND user_id IN ({placeholders})
+            """,
+            (guild_id, *ids),
+        ).fetchall()
+    )
+
+
+def get_all_afk(guild_id: int) -> list[sqlite3.Row]:
+    return db.run(
+        lambda conn: conn.execute(
+            "SELECT * FROM afk_users WHERE guild_id = ? AND is_afk = 1 ORDER BY afk_since ASC",
+            (guild_id,),
+        ).fetchall()
+    )
+
+
+def get_expired_afk(guild_id: int, now_iso: str | None = None) -> list[sqlite3.Row]:
     """AFK-записи сервера, у которых время возврата уже наступило.
 
-    Сравнение строк корректно: даты хранятся в ISO-формате datetime.isoformat().
+    Сравнение строк корректно: время хранится в UTC-формате фиксированной
+    ширины (``utils.clock.to_db``), поэтому лексикографический порядок
+    совпадает с хронологическим.
     """
-    conn = get_db()
-    try:
-        c = conn.cursor()
-        c.execute(
+    cutoff = now_iso or clock.to_db()
+    return db.run(
+        lambda conn: conn.execute(
             """
             SELECT * FROM afk_users
             WHERE guild_id = ? AND is_afk = 1
               AND estimated_return IS NOT NULL AND estimated_return <= ?
             ORDER BY afk_since ASC
-        """,
-            (guild_id, now_iso),
+            """,
+            (guild_id, cutoff),
+        ).fetchall()
+    )
+
+
+# ---------------------------------------------------------------------------
+# Кулдаун автоответов
+# ---------------------------------------------------------------------------
+
+
+def reserve_cooldown(
+    mentioner_id: int,
+    afk_user_id: int,
+    cooldown_seconds: int = 30,
+    guild_id: int = 0,
+) -> bool:
+    """Атомарно резервирует право на автоответ.
+
+    True — резерв получен (отправлять можно), False — окно ещё не истекло.
+    Проверка и запись выполняются одним условным upsert, поэтому два
+    параллельных сообщения не получают по автоответу.
+    """
+    now = clock.utcnow()
+    cutoff = clock.to_db(now - timedelta(seconds=max(cooldown_seconds, 0)))
+
+    def operation(conn: sqlite3.Connection) -> bool:
+        cursor = conn.execute(
+            """
+            INSERT INTO afk_cooldown (guild_id, mentioner_id, afk_user_id, last_reply)
+            VALUES (?, ?, ?, ?)
+            ON CONFLICT(guild_id, mentioner_id, afk_user_id) DO UPDATE SET
+                last_reply = excluded.last_reply
+            WHERE afk_cooldown.last_reply <= ?
+            """,
+            (guild_id, mentioner_id, afk_user_id, clock.to_db(now), cutoff),
         )
-        return c.fetchall()
-    finally:
-        conn.close()
+        return cursor.rowcount > 0
+
+    return db.run(operation, write=True)
+
+
+def release_cooldown(mentioner_id: int, afk_user_id: int, guild_id: int = 0) -> bool:
+    """Освобождает резерв, если отправка автоответа не удалась."""
+
+    def operation(conn: sqlite3.Connection) -> bool:
+        cursor = conn.execute(
+            """
+            DELETE FROM afk_cooldown
+            WHERE guild_id = ? AND mentioner_id = ? AND afk_user_id = ?
+            """,
+            (guild_id, mentioner_id, afk_user_id),
+        )
+        return cursor.rowcount > 0
+
+    return db.run(operation, write=True)
 
 
 def check_cooldown(
@@ -103,136 +284,121 @@ def check_cooldown(
     cooldown_seconds: int = 30,
     guild_id: int = 0,
 ) -> bool:
-    conn = get_db()
-    try:
-        c = conn.cursor()
-        c.execute(
+    """Истёк ли кулдаун. Только для чтения: резерв делает ``reserve_cooldown``."""
+    row = db.run(
+        lambda conn: conn.execute(
             """
-            SELECT last_reply
-            FROM afk_cooldown
+            SELECT last_reply FROM afk_cooldown
             WHERE guild_id = ? AND mentioner_id = ? AND afk_user_id = ?
-        """,
+            """,
             (guild_id, mentioner_id, afk_user_id),
-        )
-        row = c.fetchone()
-    finally:
-        conn.close()
-    if not row:
+        ).fetchone()
+    )
+    if row is None:
         return True
-    last = datetime.fromisoformat(row["last_reply"])
-    return (datetime.now() - last).total_seconds() >= cooldown_seconds
+    last = clock.parse_db(row["last_reply"])
+    if last is None:
+        return True
+    return clock.seconds_between(last) >= cooldown_seconds
 
 
-def set_cooldown(mentioner_id: int, afk_user_id: int, guild_id: int = 0):
-    conn = get_db()
-    try:
-        c = conn.cursor()
-        now = datetime.now().isoformat()
-        c.execute(
+def set_cooldown(mentioner_id: int, afk_user_id: int, guild_id: int = 0) -> None:
+    def operation(conn: sqlite3.Connection) -> None:
+        conn.execute(
             """
             INSERT INTO afk_cooldown (guild_id, mentioner_id, afk_user_id, last_reply)
             VALUES (?, ?, ?, ?)
             ON CONFLICT(guild_id, mentioner_id, afk_user_id) DO UPDATE SET
                 last_reply = excluded.last_reply
-        """,
-            (guild_id, mentioner_id, afk_user_id, now),
+            """,
+            (guild_id, mentioner_id, afk_user_id, clock.to_db()),
         )
-        conn.commit()
-    finally:
-        conn.close()
+
+    db.run(operation, write=True)
 
 
 def cleanup_cooldowns(before_iso: str) -> int:
     """Удаляет записи кулдауна старше даты (таблица не должна расти бесконечно)."""
-    conn = get_db()
-    try:
-        c = conn.cursor()
-        c.execute("DELETE FROM afk_cooldown WHERE last_reply < ?", (before_iso,))
-        removed = c.rowcount
-        conn.commit()
-        return removed
-    finally:
-        conn.close()
+
+    def operation(conn: sqlite3.Connection) -> int:
+        cursor = conn.execute("DELETE FROM afk_cooldown WHERE last_reply < ?", (before_iso,))
+        return cursor.rowcount
+
+    return db.run(operation, write=True)
 
 
-def get_user_stats(user_id: int, guild_id: int | None = None):
-    conn = get_db()
-    try:
-        c = conn.cursor()
+# ---------------------------------------------------------------------------
+# Статистика и приватность
+# ---------------------------------------------------------------------------
+
+
+def get_user_stats(user_id: int, guild_id: int | None = None) -> sqlite3.Row | None:
+    def operation(conn: sqlite3.Connection) -> sqlite3.Row | None:
         if guild_id is None:
-            c.execute(
+            return conn.execute(
                 "SELECT * FROM afk_stats WHERE user_id = ? ORDER BY guild_id LIMIT 1",
                 (user_id,),
-            )
-        else:
-            c.execute(
-                "SELECT * FROM afk_stats WHERE guild_id = ? AND user_id = ?",
-                (guild_id, user_id),
-            )
-        return c.fetchone()
-    finally:
-        conn.close()
+            ).fetchone()
+        return conn.execute(
+            "SELECT * FROM afk_stats WHERE guild_id = ? AND user_id = ?",
+            (guild_id, user_id),
+        ).fetchone()
+
+    return db.run(operation)
 
 
-def update_stats_on_set(user_id: int, guild_id: int = 0):
-    conn = get_db()
-    try:
-        c = conn.cursor()
-        c.execute(
+def update_stats_on_set(user_id: int, guild_id: int = 0) -> None:
+    def operation(conn: sqlite3.Connection) -> None:
+        conn.execute(
             """
-            INSERT INTO afk_stats (guild_id, user_id, total_afk_count, total_afk_seconds, longest_afk_seconds)
+            INSERT INTO afk_stats
+                (guild_id, user_id, total_afk_count, total_afk_seconds, longest_afk_seconds)
             VALUES (?, ?, 1, 0, 0)
             ON CONFLICT(guild_id, user_id) DO UPDATE SET
                 total_afk_count = total_afk_count + 1
-        """,
+            """,
             (guild_id, user_id),
         )
-        conn.commit()
-    finally:
-        conn.close()
+
+    db.run(operation, write=True)
 
 
-def update_stats_on_remove(user_id: int, afk_seconds: int, guild_id: int = 0):
-    conn = get_db()
-    try:
-        c = conn.cursor()
-        c.execute(
+def update_stats_on_remove(user_id: int, afk_seconds: int, guild_id: int = 0) -> None:
+    def operation(conn: sqlite3.Connection) -> None:
+        conn.execute(
             """
-            INSERT INTO afk_stats (guild_id, user_id, total_afk_count, total_afk_seconds, longest_afk_seconds)
+            INSERT INTO afk_stats
+                (guild_id, user_id, total_afk_count, total_afk_seconds, longest_afk_seconds)
             VALUES (?, ?, 0, ?, ?)
             ON CONFLICT(guild_id, user_id) DO UPDATE SET
                 total_afk_seconds = total_afk_seconds + excluded.total_afk_seconds,
-                longest_afk_seconds = CASE
-                    WHEN longest_afk_seconds < excluded.longest_afk_seconds
-                    THEN excluded.longest_afk_seconds
-                    ELSE longest_afk_seconds
-                END
-        """,
+                longest_afk_seconds = MAX(longest_afk_seconds, excluded.longest_afk_seconds)
+            """,
             (guild_id, user_id, afk_seconds, afk_seconds),
         )
-        conn.commit()
-    finally:
-        conn.close()
+
+    db.run(operation, write=True)
 
 
 def delete_user_data(user_id: int, guild_id: int) -> dict[str, int]:
     """Удаляет AFK-данные пользователя в рамках одного сервера."""
-    conn = get_db()
-    try:
-        c = conn.cursor()
-        c.execute("DELETE FROM afk_users WHERE guild_id = ? AND user_id = ?", (guild_id, user_id))
-        users = c.rowcount
-        c.execute("DELETE FROM afk_stats WHERE guild_id = ? AND user_id = ?", (guild_id, user_id))
-        stats = c.rowcount
-        c.execute(
+
+    def operation(conn: sqlite3.Connection) -> dict[str, int]:
+        users = conn.execute(
+            "DELETE FROM afk_users WHERE guild_id = ? AND user_id = ?",
+            (guild_id, user_id),
+        ).rowcount
+        stats = conn.execute(
+            "DELETE FROM afk_stats WHERE guild_id = ? AND user_id = ?",
+            (guild_id, user_id),
+        ).rowcount
+        cooldowns = conn.execute(
             """
             DELETE FROM afk_cooldown
             WHERE guild_id = ? AND (mentioner_id = ? OR afk_user_id = ?)
             """,
             (guild_id, user_id, user_id),
-        )
-        cooldowns = c.rowcount
-        conn.commit()
+        ).rowcount
         return {"afk_users": users, "afk_stats": stats, "afk_cooldown": cooldowns}
-    finally:
-        conn.close()
+
+    return db.run(operation, write=True)

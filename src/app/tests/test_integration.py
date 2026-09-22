@@ -110,7 +110,7 @@ class TestIntegrationAfkFlow(unittest.IsolatedAsyncioTestCase):
         ctx.guild = MagicMock()
         ctx.guild.id = 123
 
-        with patch("afk.models.get_all_afk") as mock_get:
+        with patch("afk.views.get_all_afk") as mock_get:
             mock_get.return_value = []
             await cog.afk_list_command.callback(cog, ctx)
 

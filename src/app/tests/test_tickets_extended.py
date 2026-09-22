@@ -1,391 +1,376 @@
+"""Кнопки и модалки заявок: права, ветвления и обработка ошибок.
+
+Дополняет test_tickets_close.py, где проверяется идемпотентность
+терминальных действий, и test_tickets.py с юнит-проверками форм.
+"""
+
+import json
+import sqlite3
 import unittest
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import discord
 
 import config
+from database.schema import STATUS_ACCEPTED, STATUS_OPEN
+from database.tickets_db import get_open_ticket_for_user, get_ticket, save_ticket
+from tests.support import (
+    FakeChannel,
+    FakeGuild,
+    FakeInteraction,
+    FakeMember,
+    http_exception,
+    make_forbidden,
+    use_temp_database,
+)
 from tickets.call_voice import VoiceCallButton, VoiceSelectView
 from tickets.close_ticket import CloseButton
 from tickets.create_ticket import create_ticket
 from tickets.decision import ACCEPT, DENY, AcceptButton, DecisionReasonModal, DenyButton
 
 
-class TestAcceptButton(unittest.IsolatedAsyncioTestCase):
-    async def test_callback_sends_modal(self):
-        btn = AcceptButton()
-        interaction = MagicMock()
-        interaction.response = MagicMock()
-        interaction.response.send_modal = AsyncMock()
-        interaction.channel = MagicMock()
-
-        await btn.callback(interaction)
-        interaction.response.send_modal.assert_called_once()
+def staff_permissions(granted=True):
+    return SimpleNamespace(administrator=False, manage_guild=False, manage_messages=granted)
 
 
-class TestAcceptReasonModalSubmit(unittest.IsolatedAsyncioTestCase):
+def make_staff(user_id=9, name="mod"):
+    member = FakeMember(user_id=user_id, name=name)
+    member.guild_permissions = staff_permissions(True)
+    member.roles = []
+    return member
+
+
+class DecisionButtonTestCase(unittest.IsolatedAsyncioTestCase):
+    """Кнопки «Принять»/«Отказать» открывают модалку только персоналу."""
+
+    async def test_staff_gets_modal(self):
+        interaction = FakeInteraction(user=make_staff())
+        interaction.channel = FakeChannel()
+
+        await AcceptButton().callback(interaction)
+
+        interaction.response.send_modal.assert_awaited_once()
+        modal = interaction.response.send_modal.await_args.args[0]
+        self.assertIsInstance(modal, DecisionReasonModal)
+        self.assertIs(modal.decision, ACCEPT)
+
+    async def test_deny_button_uses_deny_decision(self):
+        interaction = FakeInteraction(user=make_staff())
+        interaction.channel = FakeChannel()
+
+        await DenyButton().callback(interaction)
+
+        modal = interaction.response.send_modal.await_args.args[0]
+        self.assertIs(modal.decision, DENY)
+
+    async def test_regular_member_denied(self):
+        member = FakeMember(user_id=42)
+        member.guild_permissions = staff_permissions(False)
+        member.roles = []
+        interaction = FakeInteraction(user=member)
+        interaction.channel = FakeChannel()
+
+        await AcceptButton().callback(interaction)
+
+        interaction.response.send_modal.assert_not_awaited()
+        self.assertIn(config.TICKET_NO_PERMISSION, interaction.sent_texts())
+
+
+class DecisionSubmitTestCase(unittest.IsolatedAsyncioTestCase):
+    """Отправка модалки решения на реальной записи в БД."""
+
+    CHANNEL_ID = 123
+    GUILD_ID = 555
+
+    def setUp(self):
+        use_temp_database(self)
+        self.guild = FakeGuild(guild_id=self.GUILD_ID)
+        self.applicant = FakeMember(user_id=456, name="applicant")
+        self.guild.add_member(self.applicant)
+        self.channel = FakeChannel(channel_id=self.CHANNEL_ID, guild=self.guild)
+        self.guild.add_channel(self.channel)
+        self.moderator = make_staff()
+
+    def _save(self):
+        save_ticket(self.CHANNEL_ID, 456, "applicant", "RP", "rp", "{}", guild_id=self.GUILD_ID)
+
+    def _modal(self, decision=ACCEPT, reason="Хорошая заявка"):
+        modal = DecisionReasonModal(self.channel, decision)
+        modal.reason = MagicMock(value=reason)
+        return modal
+
+    def _interaction(self):
+        return FakeInteraction(user=self.moderator, guild=self.guild, channel=self.channel)
+
     async def test_submit_success(self):
-        channel = MagicMock()
-        channel.id = 123
-        channel.send = AsyncMock()
-        channel.delete = AsyncMock()
+        self._save()
+        interaction = self._interaction()
 
-        modal = DecisionReasonModal(channel, ACCEPT)
-        modal.reason = MagicMock()
-        modal.reason.value = "Хорошая заявка"
+        with patch("tickets.workflow.send_to_log", new_callable=AsyncMock) as mock_log:
+            await self._modal().on_submit(interaction)
 
-        guild = MagicMock()
-        guild.channels = []
-        guild.create_text_channel = AsyncMock(return_value=MagicMock(send=AsyncMock()))
+        self.assertEqual(get_ticket(self.CHANNEL_ID)["status"], STATUS_ACCEPTED)
+        self.channel.send.assert_awaited_once()
+        self.channel.delete.assert_awaited_once()
+        interaction.response.send_message.assert_awaited_once()
+        mock_log.assert_awaited_once()
 
-        interaction = MagicMock()
-        interaction.guild = guild
-        interaction.user = MagicMock()
-        interaction.user.mention = "<@999>"
-        interaction.response = MagicMock()
-        interaction.response.send_message = AsyncMock()
+    async def test_deny_submit_success(self):
+        self._save()
+        interaction = self._interaction()
 
-        mock_ticket = {"user_id": 456}
-        mock_member = MagicMock()
-        mock_member.mention = "<@456>"
-        guild.get_member = MagicMock(return_value=mock_member)
+        with patch("tickets.workflow.send_to_log", new_callable=AsyncMock):
+            await self._modal(DENY, "Не подходит").on_submit(interaction)
 
-        with patch("tickets.decision.get_ticket") as mock_get:
-            with patch("tickets.decision.update_ticket_status") as mock_update:
-                with patch("tickets.decision.discord.utils.get", return_value=None):
-                    with patch("tickets.decision.send_to_log", new_callable=AsyncMock):
-                        with patch("tickets.decision.add_log_message_id"):
-                            mock_get.return_value = mock_ticket
-                            await modal.on_submit(interaction)
-
-        mock_update.assert_called_once()
-        channel.send.assert_called_once()
-        interaction.response.send_message.assert_called_once()
-        channel.delete.assert_called_once()
+        self.assertEqual(get_ticket(self.CHANNEL_ID)["status"], "denied")
+        self.applicant.send.assert_awaited_once()
 
     async def test_submit_no_ticket(self):
-        channel = MagicMock()
-        channel.id = 123
-        channel.send = AsyncMock()
-        channel.delete = AsyncMock()
+        """Канал без записи — решение невозможно, канал не трогаем."""
+        interaction = self._interaction()
 
-        modal = DecisionReasonModal(channel, ACCEPT)
-        modal.reason = MagicMock()
-        modal.reason.value = "Причина"
+        with patch("tickets.workflow.send_to_log", new_callable=AsyncMock) as mock_log:
+            await self._modal().on_submit(interaction)
 
-        guild = MagicMock()
-        guild.channels = []
-        guild.create_text_channel = AsyncMock(return_value=MagicMock(send=AsyncMock()))
-        guild.get_member = MagicMock(return_value=None)
+        mock_log.assert_not_awaited()
+        self.channel.send.assert_not_awaited()
+        self.channel.delete.assert_not_awaited()
+        self.assertIn(config.TICKET_ALREADY_DECIDED, interaction.sent_texts())
 
-        interaction = MagicMock()
-        interaction.guild = guild
-        interaction.user = MagicMock()
-        interaction.user.mention = "<@999>"
-        interaction.response = MagicMock()
-        interaction.response.send_message = AsyncMock()
+    async def test_reason_stored_in_ticket(self):
+        self._save()
 
-        with patch("tickets.decision.get_ticket") as mock_get:
-            with patch("tickets.decision.update_ticket_status") as mock_update:
-                with patch("tickets.decision.discord.utils.get", return_value=None):
-                    with patch("tickets.decision.send_to_log", new_callable=AsyncMock):
-                        with patch("tickets.decision.add_log_message_id"):
-                            mock_get.return_value = None
-                            await modal.on_submit(interaction)
+        with patch("tickets.workflow.send_to_log", new_callable=AsyncMock):
+            await self._modal(reason="Годная анкета").on_submit(self._interaction())
 
-        mock_update.assert_called_once()
-        channel.send.assert_called_once()
+        self.assertEqual(get_ticket(self.CHANNEL_ID)["reason"], "Годная анкета")
+
+    async def test_applicant_left_guild_is_handled(self):
+        self._save()
+        guild = FakeGuild(guild_id=self.GUILD_ID)
+        guild.add_channel(self.channel)
+        interaction = FakeInteraction(user=self.moderator, guild=guild, channel=self.channel)
+
+        with patch("tickets.workflow.send_to_log", new_callable=AsyncMock):
+            await self._modal().on_submit(interaction)
+
+        self.assertEqual(get_ticket(self.CHANNEL_ID)["status"], STATUS_ACCEPTED)
 
 
-class TestDenyButton(unittest.IsolatedAsyncioTestCase):
-    async def test_callback_sends_modal(self):
-        btn = DenyButton()
-        interaction = MagicMock()
-        interaction.response = MagicMock()
-        interaction.response.send_modal = AsyncMock()
-        interaction.channel = MagicMock()
+class VoiceCallTestCase(unittest.IsolatedAsyncioTestCase):
+    """Вызов на обзвон."""
 
-        await btn.callback(interaction)
-        interaction.response.send_modal.assert_called_once()
+    async def test_staff_gets_channel_picker(self):
+        interaction = FakeInteraction(user=make_staff())
+        interaction.channel = FakeChannel()
 
+        await VoiceCallButton().callback(interaction)
 
-class TestDenyReasonModalSubmit(unittest.IsolatedAsyncioTestCase):
-    async def test_submit_success(self):
-        channel = MagicMock()
-        channel.id = 123
-        channel.send = AsyncMock()
-        channel.delete = AsyncMock()
+        interaction.response.send_message.assert_awaited_once()
+        self.assertIn("view", interaction.response.send_message.await_args.kwargs)
 
-        modal = DecisionReasonModal(channel, DENY)
-        modal.reason = MagicMock()
-        modal.reason.value = "Не подходит"
+    async def test_regular_member_denied(self):
+        member = FakeMember(user_id=42)
+        member.guild_permissions = staff_permissions(False)
+        member.roles = []
+        interaction = FakeInteraction(user=member)
+        interaction.channel = FakeChannel()
 
-        guild = MagicMock()
-        guild.channels = []
-        guild.create_text_channel = AsyncMock(return_value=MagicMock(send=AsyncMock()))
+        await VoiceCallButton().callback(interaction)
 
-        interaction = MagicMock()
-        interaction.guild = guild
-        interaction.user = MagicMock()
-        interaction.user.mention = "<@999>"
-        interaction.response = MagicMock()
-        interaction.response.send_message = AsyncMock()
+        self.assertIn(config.TICKET_NO_PERMISSION, interaction.sent_texts())
 
-        mock_ticket = {"user_id": 456}
-        mock_member = MagicMock()
-        mock_member.mention = "<@456>"
-        guild.get_member = MagicMock(return_value=mock_member)
+    async def test_voice_button_invites_applicant(self):
+        use_temp_database(self)
+        guild = FakeGuild(guild_id=1)
+        applicant = FakeMember(user_id=456, name="applicant")
+        guild.add_member(applicant)
+        ticket_channel = FakeChannel(channel_id=123, guild=guild)
+        save_ticket(123, 456, "applicant", "RP", "rp", "{}", guild_id=1)
 
-        with patch("tickets.decision.get_ticket") as mock_get:
-            with patch("tickets.decision.update_ticket_status") as mock_update:
-                with patch("tickets.decision.discord.utils.get", return_value=None):
-                    with patch("tickets.decision.send_to_log", new_callable=AsyncMock):
-                        with patch("tickets.decision.add_log_message_id"):
-                            mock_get.return_value = mock_ticket
-                            await modal.on_submit(interaction)
-
-        mock_update.assert_called_once()
-        channel.send.assert_called_once()
-        interaction.response.send_message.assert_called_once()
-        channel.delete.assert_called_once()
-
-    async def test_submit_no_ticket(self):
-        channel = MagicMock()
-        channel.id = 123
-        channel.send = AsyncMock()
-        channel.delete = AsyncMock()
-
-        modal = DecisionReasonModal(channel, DENY)
-        modal.reason = MagicMock()
-        modal.reason.value = "Причина"
-
-        guild = MagicMock()
-        guild.channels = []
-        guild.create_text_channel = AsyncMock(return_value=MagicMock(send=AsyncMock()))
-        guild.get_member = MagicMock(return_value=None)
-
-        interaction = MagicMock()
-        interaction.guild = guild
-        interaction.user = MagicMock()
-        interaction.user.mention = "<@999>"
-        interaction.response = MagicMock()
-        interaction.response.send_message = AsyncMock()
-
-        with patch("tickets.decision.get_ticket") as mock_get:
-            with patch("tickets.decision.update_ticket_status") as mock_update:
-                with patch("tickets.decision.discord.utils.get", return_value=None):
-                    with patch("tickets.decision.send_to_log", new_callable=AsyncMock):
-                        with patch("tickets.decision.add_log_message_id"):
-                            mock_get.return_value = None
-                            await modal.on_submit(interaction)
-
-        mock_update.assert_called_once()
-        channel.send.assert_called_once()
-
-
-class TestVoiceCallButton(unittest.IsolatedAsyncioTestCase):
-    async def test_callback_sends_view(self):
-        btn = VoiceCallButton()
-        interaction = MagicMock()
-        interaction.response = MagicMock()
-        interaction.response.send_message = AsyncMock()
-        interaction.channel = MagicMock()
-
-        await btn.callback(interaction)
-        interaction.response.send_message.assert_called_once()
-        call_args = interaction.response.send_message.call_args
-        self.assertIn("view", call_args.kwargs)
-
-
-class TestVoiceSelectViewButtons(unittest.IsolatedAsyncioTestCase):
-    async def test_voice_button_found(self):
-        ticket_channel = MagicMock()
-        ticket_channel.id = 123
-        ticket_channel.send = AsyncMock()
+        voice = MagicMock()
+        voice.id = 77
+        voice.mention = "<#77>"
 
         view = VoiceSelectView(ticket_channel)
-        btn = view.children[0]
+        interaction = FakeInteraction(user=make_staff(), guild=guild)
 
-        interaction = MagicMock()
-        interaction.user = MagicMock()
-        interaction.user.mention = "<@ recruiter>"
-        interaction.guild = MagicMock()
-        interaction.response = MagicMock()
-        interaction.response.send_message = AsyncMock()
+        with patch("tickets.call_voice.get_voice_channel", return_value=voice):
+            with patch("tickets.call_voice.send_to_log", new_callable=AsyncMock) as mock_log:
+                await view.children[0].callback(interaction)
 
-        voice_ch = MagicMock()
-        voice_ch.mention = "<#voice1>"
-        interaction.guild.voice_channels = [voice_ch]
-        interaction.guild.get_member = MagicMock(return_value=MagicMock(mention="<@456>"))
+        self.assertEqual(ticket_channel.send.await_count, 2)
+        interaction.response.send_message.assert_awaited_once()
+        mock_log.assert_awaited_once()
+        # приглашение адресовано только заявителю
+        allowed = ticket_channel.send.await_args.kwargs["allowed_mentions"]
+        self.assertEqual(allowed.users, [applicant])
+        self.assertFalse(allowed.everyone)
 
-        with patch("tickets.call_voice.get_ticket") as mock_get:
-            mock_get.return_value = {"user_id": 456}
-            with patch("tickets.call_voice.discord.utils.get", return_value=voice_ch):
-                with patch("config.ALLOW_NAME_FALLBACK", True):
-                    await btn.callback(interaction)
-
-        ticket_channel.send.assert_called()
-        interaction.response.send_message.assert_called_once()
-
-    async def test_voice_button_not_found(self):
-        ticket_channel = MagicMock()
-        ticket_channel.id = 123
-        ticket_channel.send = AsyncMock()
-
+    async def test_voice_channel_not_found(self):
+        use_temp_database(self)
+        guild = FakeGuild(guild_id=1)
+        ticket_channel = FakeChannel(channel_id=123, guild=guild)
         view = VoiceSelectView(ticket_channel)
-        btn = view.children[0]
+        interaction = FakeInteraction(user=make_staff(), guild=guild)
 
-        interaction = MagicMock()
-        interaction.user = MagicMock()
-        interaction.user.mention = "<@ recruiter>"
-        interaction.guild = MagicMock()
-        interaction.guild.voice_channels = []
-        interaction.response = MagicMock()
-        interaction.response.send_message = AsyncMock()
+        with patch("tickets.call_voice.get_voice_channel", return_value=None):
+            await view.children[0].callback(interaction)
 
-        with patch("tickets.call_voice.get_ticket") as mock_get:
-            mock_get.return_value = {"user_id": 456}
-            with patch("tickets.call_voice.discord.utils.get", return_value=None):
-                await btn.callback(interaction)
+        ticket_channel.send.assert_awaited_once()
+        self.assertIn("не найден", ticket_channel.send.await_args.args[0])
+        interaction.response.send_message.assert_awaited_once()
 
-        ticket_channel.send.assert_called_once()
-        interaction.response.send_message.assert_called_once()
+    async def test_send_failure_is_reported_once(self):
+        """Ошибка Discord уходит в error boundary, а не в трейс пользователю."""
+        use_temp_database(self)
+        guild = FakeGuild(guild_id=1)
+        ticket_channel = FakeChannel(channel_id=123, guild=guild)
+        ticket_channel.send = AsyncMock(side_effect=http_exception())
+        voice = MagicMock(id=77, mention="<#77>")
+        view = VoiceSelectView(ticket_channel)
+        interaction = FakeInteraction(user=make_staff(), guild=guild)
 
+        with patch("tickets.call_voice.get_voice_channel", return_value=voice):
+            await view.children[0].callback(interaction)
 
-class TestCloseButton(unittest.IsolatedAsyncioTestCase):
-    async def test_callback_deletes_channel(self):
-        btn = CloseButton()
-        interaction = MagicMock()
-        interaction.user.mention = "<@9>"
-        interaction.response = MagicMock()
-        interaction.response.send_message = AsyncMock()
-        interaction.channel = MagicMock()
-        interaction.channel.id = 123
-        interaction.channel.delete = AsyncMock()
-        interaction.guild.get_member = MagicMock(return_value=None)
-
-        with patch("tickets.close_ticket.get_ticket", return_value=None):
-            with patch("tickets.close_ticket.update_ticket_status") as mock_update:
-                with patch("tickets.close_ticket.send_to_log", new_callable=AsyncMock):
-                    with patch("tickets.close_ticket.add_log_message_id"):
-                        await btn.callback(interaction)
-
-        interaction.response.send_message.assert_called_once()
-        interaction.channel.delete.assert_called_once()
-        mock_update.assert_called_once()
+        self.assertTrue(interaction.sent_texts())
 
 
-class TestCreateTicketErrors(unittest.IsolatedAsyncioTestCase):
-    async def test_create_ticket_forbidden_role(self):
-        interaction = MagicMock()
-        interaction.guild = MagicMock()
-        interaction.guild.roles = []
-        interaction.guild.me = MagicMock()
-        interaction.guild.create_text_channel = AsyncMock()
-        interaction.guild.create_category = AsyncMock(return_value=MagicMock())
-        interaction.guild.default_role = MagicMock()
+class CloseButtonPermissionTestCase(unittest.IsolatedAsyncioTestCase):
+    async def test_channel_without_ticket_is_not_deleted(self):
+        use_temp_database(self)
+        guild = FakeGuild(guild_id=1)
+        channel = FakeChannel(channel_id=123, guild=guild)
+        interaction = FakeInteraction(user=make_staff(), guild=guild, channel=channel)
 
-        interaction.user = MagicMock()
-        interaction.user.name = "Tester"
-        interaction.user.id = 123
-        interaction.user.add_roles = AsyncMock(
-            side_effect=discord.Forbidden(MagicMock(), "No perms")
-        )
-        interaction.user.create_dm = AsyncMock(return_value=MagicMock(send=AsyncMock()))
+        with patch("tickets.workflow.send_to_log", new_callable=AsyncMock):
+            await CloseButton().callback(interaction)
 
-        interaction.response = MagicMock()
-        interaction.response.send_message = AsyncMock()
-        interaction.edit_original_response = AsyncMock()
+        channel.delete.assert_not_awaited()
+        self.assertIn(config.TICKET_ALREADY_DECIDED, interaction.sent_texts())
 
-        mock_channel = MagicMock()
-        mock_channel.mention = "<#456>"
-        mock_channel.name = "rp-tester"
-        mock_channel.id = 456
-        mock_channel.send = AsyncMock()
-        interaction.guild.create_text_channel.return_value = mock_channel
 
-        inputs = {"Никнейм": MagicMock(value="TestNick")}
+class CreateTicketErrorsTestCase(unittest.IsolatedAsyncioTestCase):
+    """Issue #2: поведение при сбое на каждом шаге создания."""
 
-        with patch("tickets.create_ticket.save_ticket"):
-            with patch("tickets.create_ticket.FullTicketView", return_value=MagicMock()):
-                with patch("tickets.create_ticket.discord.utils.get", return_value=None):
-                    with patch("tickets.create_ticket.send_to_log", new_callable=AsyncMock):
-                        with patch("tickets.create_ticket.add_log_message_id"):
-                            await create_ticket(interaction, "RP ЗАЯВКА", "rp", inputs)
+    GUILD_ID = 321
+    USER_ID = 123
 
-        interaction.edit_original_response.assert_called_once()
-        call_args = interaction.edit_original_response.call_args
-        text = call_args.args[0] if call_args.args else call_args.kwargs.get("content", "")
-        self.assertIn("Заявка создана", text)
+    def setUp(self):
+        use_temp_database(self)
+        self.guild = FakeGuild(guild_id=self.GUILD_ID)
+        self.member = FakeMember(user_id=self.USER_ID, name="Tester")
+        self.guild.add_member(self.member)
+        self.channel = FakeChannel(channel_id=456, name="rp-tester", guild=self.guild)
+        self.guild.create_text_channel = AsyncMock(return_value=self.channel)
+        self.interaction = FakeInteraction(user=self.member, guild=self.guild)
+        self.interaction.edit_original_response = AsyncMock()
+        self.inputs = {"Никнейм": MagicMock(value="TestNick")}
 
-    async def test_create_ticket_dm_forbidden(self):
-        interaction = MagicMock()
-        interaction.guild = MagicMock()
-        interaction.guild.roles = []
-        interaction.guild.me = MagicMock()
-        interaction.guild.create_text_channel = AsyncMock()
-        interaction.guild.create_category = AsyncMock(return_value=MagicMock())
-        interaction.guild.default_role = MagicMock()
+    def _reply_text(self) -> str:
+        call = self.interaction.edit_original_response.await_args
+        if call is None:
+            return ""
+        return call.args[0] if call.args else call.kwargs.get("content", "")
 
-        interaction.user = MagicMock()
-        interaction.user.name = "Tester"
-        interaction.user.id = 123
-        interaction.user.add_roles = AsyncMock()
-        interaction.user.create_dm = AsyncMock(
-            side_effect=discord.Forbidden(MagicMock(), "DM closed")
-        )
+    async def _create(self, **patches):
+        defaults = {
+            "get_category": patch("tickets.create_ticket.get_category", return_value=MagicMock()),
+            "get_role": patch("tickets.create_ticket.get_role", return_value=None),
+            "send_to_log": patch(
+                "tickets.create_ticket.send_to_log", new_callable=AsyncMock, return_value=None
+            ),
+            "view": patch("tickets.create_ticket.FullTicketView", return_value=MagicMock()),
+        }
+        defaults.update(patches)
+        started = [ctx.start() for ctx in defaults.values()]
+        self.addCleanup(lambda: [ctx.stop() for ctx in defaults.values()])
+        del started
+        return await create_ticket(self.interaction, config.TICKET_RP_TITLE, "rp", self.inputs)
 
-        interaction.response = MagicMock()
-        interaction.response.send_message = AsyncMock()
-        interaction.edit_original_response = AsyncMock()
+    async def test_role_grant_forbidden_does_not_fail_ticket(self):
+        """Не выдалась роль — заявка всё равно создана."""
+        role = MagicMock(spec=discord.Role)
+        role.id = 5
+        role.mention = "<@&5>"
+        role.__lt__ = lambda self, other: True
+        self.member.add_roles = AsyncMock(side_effect=make_forbidden())
 
-        mock_channel = MagicMock()
-        mock_channel.mention = "<#456>"
-        mock_channel.name = "rp-tester"
-        mock_channel.id = 456
-        mock_channel.send = AsyncMock()
-        interaction.guild.create_text_channel.return_value = mock_channel
+        await self._create(get_role=patch("tickets.create_ticket.get_role", return_value=role))
 
-        inputs = {"Никнейм": MagicMock(value="TestNick")}
+        self.assertIn("Заявка создана", self._reply_text())
+        self.assertIsNotNone(get_open_ticket_for_user(self.GUILD_ID, self.USER_ID))
 
-        with patch("tickets.create_ticket.save_ticket"):
-            with patch("tickets.create_ticket.FullTicketView", return_value=MagicMock()):
-                with patch("tickets.create_ticket.discord.utils.get", return_value=None):
-                    with patch("tickets.create_ticket.send_to_log", new_callable=AsyncMock):
-                        with patch("tickets.create_ticket.add_log_message_id"):
-                            await create_ticket(interaction, "RP ЗАЯВКА", "rp", inputs)
+    async def test_dm_forbidden_does_not_fail_ticket(self):
+        self.member.send = AsyncMock(side_effect=make_forbidden())
 
-        interaction.edit_original_response.assert_called_once()
+        await self._create()
 
-    async def test_create_ticket_exception(self):
-        interaction = MagicMock()
-        interaction.guild = MagicMock()
-        interaction.guild.roles = []
-        interaction.guild.me = MagicMock()
-        interaction.guild.create_text_channel = AsyncMock(side_effect=Exception("DB error"))
-        interaction.guild.create_category = AsyncMock(return_value=MagicMock())
-        interaction.guild.default_role = MagicMock()
+        self.assertIn("Заявка создана", self._reply_text())
+        self.assertIsNotNone(get_open_ticket_for_user(self.GUILD_ID, self.USER_ID))
 
-        interaction.user = MagicMock()
-        interaction.user.name = "Tester"
-        interaction.user.id = 123
-        interaction.user.add_roles = AsyncMock()
-        interaction.user.create_dm = AsyncMock(return_value=MagicMock(send=AsyncMock()))
+    async def test_card_send_failure_does_not_fail_ticket(self):
+        self.channel.send = AsyncMock(side_effect=http_exception())
 
-        interaction.response = MagicMock()
-        interaction.response.send_message = AsyncMock()
-        interaction.edit_original_response = AsyncMock()
+        await self._create()
 
-        inputs = {"Никнейм": MagicMock(value="TestNick")}
+        self.assertIn("Заявка создана", self._reply_text())
+        self.assertIsNotNone(get_open_ticket_for_user(self.GUILD_ID, self.USER_ID))
 
-        with patch("tickets.create_ticket.discord.utils.get", return_value=None):
-            with patch("tickets.create_ticket.send_to_log", new_callable=AsyncMock):
-                with patch("tickets.create_ticket.add_log_message_id"):
-                    await create_ticket(interaction, "RP ЗАЯВКА", "rp", inputs)
+    async def test_channel_creation_failure_leaves_no_row(self):
+        self.guild.create_text_channel = AsyncMock(side_effect=make_forbidden())
 
-        interaction.edit_original_response.assert_called_once()
-        call_args = interaction.edit_original_response.call_args
-        text = call_args.args[0] if call_args.args else call_args.kwargs.get("content", "")
-        self.assertIn(config.ERROR_TICKET_CREATE, text)
+        result = await self._create()
+
+        self.assertIsNone(result)
+        self.assertIn(config.ERROR_TICKET_CREATE, self._reply_text())
+        self.assertIsNone(get_open_ticket_for_user(self.GUILD_ID, self.USER_ID))
+
+    async def test_db_failure_removes_created_channel(self):
+        """Issue #2: запись не легла — канал не должен остаться сиротой."""
+        with patch("tickets.create_ticket.save_ticket", side_effect=sqlite3.OperationalError("x")):
+            result = await self._create()
+
+        self.assertIsNone(result)
+        self.channel.delete.assert_awaited_once()
+        self.assertIn(config.ERROR_TICKET_CREATE, self._reply_text())
+        self.assertIsNone(get_open_ticket_for_user(self.GUILD_ID, self.USER_ID))
+
+    async def test_duplicate_submit_removes_extra_channel(self):
+        """Параллельный submit: победитель один, лишний канал удаляется."""
+        save_ticket(999, self.USER_ID, "Tester", "RP", "rp", "{}", guild_id=self.GUILD_ID)
+
+        with patch(
+            "tickets.create_ticket.get_open_ticket_for_user",
+            side_effect=[None, {"channel_id": 999}],
+        ):
+            with patch(
+                "tickets.create_ticket.save_ticket", side_effect=sqlite3.IntegrityError("unique")
+            ):
+                result = await self._create()
+
+        self.assertIsNone(result)
+        self.channel.delete.assert_awaited_once()
+        self.assertIn("999", self._reply_text())
+
+    async def test_existing_ticket_short_circuits(self):
+        save_ticket(777, self.USER_ID, "Tester", "RP", "rp", "{}", guild_id=self.GUILD_ID)
+
+        result = await self._create()
+
+        self.assertIsNone(result)
+        self.guild.create_text_channel.assert_not_awaited()
+        self.assertIn("777", self._reply_text())
+
+    async def test_successful_ticket_is_persisted(self):
+        result = await self._create()
+
+        self.assertIs(result, self.channel)
+        row = get_open_ticket_for_user(self.GUILD_ID, self.USER_ID)
+        self.assertEqual(row["status"], STATUS_OPEN)
+        self.assertEqual(json.loads(row["answers"]), {"Никнейм": "TestNick"})
 
 
 if __name__ == "__main__":

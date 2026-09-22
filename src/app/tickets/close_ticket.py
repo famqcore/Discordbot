@@ -1,12 +1,17 @@
+"""Кнопка «Закрыть тикет»: идемпотентное терминальное действие (issue #3)."""
+
+from __future__ import annotations
+
 import discord
 
 import config
-from database.tickets_db import add_log_message_id, get_ticket, update_ticket_status
-from utils.logcenter import LOG_KEY_DECISIONS, send_to_log
+from database.schema import STATUS_CLOSED
+from utils.errors import InteractionErrorBoundary
 from utils.logger import logger
+from utils.mentions import mentions_for
 from utils.permissions import is_staff
 
-from .transcript import build_transcript_file
+from .workflow import claim_ticket, complete_terminal_action, ticket_for_channel
 
 
 class CloseButton(discord.ui.Button):
@@ -22,37 +27,61 @@ class CloseButton(discord.ui.Button):
             await interaction.response.send_message(config.TICKET_NO_PERMISSION, ephemeral=True)
             return
 
-        # отвечаем сразу: дальше канал удалится и отвечать будет некуда
-        await interaction.response.send_message("Тикет закрывается...", ephemeral=True)
-
         channel = interaction.channel
         guild = interaction.guild
-        ticket = get_ticket(channel.id)
-        files = await build_transcript_file(channel)
-        update_ticket_status(channel.id, "closed", closed_by=interaction.user.id)
+        guild_id = getattr(guild, "id", None)
+        channel_id = getattr(channel, "id", None)
 
-        if ticket and guild:
-            applicant = guild.get_member(ticket["user_id"])
-            if applicant:
-                try:
-                    await applicant.send(config.DM_TICKET_CLOSED)
-                except Exception:
-                    pass  # личка закрыта — не критично
+        ticket = ticket_for_channel(channel_id, guild_id)
+        if ticket is None:
+            # кнопка нажата в канале, который не является тикетом этого сервера
+            await interaction.response.send_message(config.TICKET_ALREADY_DECIDED, ephemeral=True)
+            return
 
-        embed = discord.Embed(
-            title=config.TICKET_CLOSED_LOG_TITLE,
-            color=discord.Color.dark_grey(),
-        )
-        embed.add_field(
-            name="Тикет", value=ticket["topic"] if ticket else channel.name, inline=True
-        )
-        embed.add_field(name="Закрыл", value=interaction.user.mention, inline=True)
-        log_message = await send_to_log(guild, LOG_KEY_DECISIONS, embed=embed, files=files)
-        if log_message is not None:
-            add_log_message_id(channel.id, log_message.channel.id, log_message.id)
+        if not claim_ticket(channel_id, STATUS_CLOSED, guild_id):
+            await interaction.response.send_message(config.TICKET_ALREADY_DECIDED, ephemeral=True)
+            return
 
-        try:
-            await channel.delete(reason=f"Тикет закрыт модератором {interaction.user}")
-        except Exception as e:
-            logger.error(f"Не удалось удалить канал тикета {channel.id}: {e}")
-        logger.info(f"Тикет {channel.id} закрыт модератором {interaction.user}")
+        async with InteractionErrorBoundary(interaction, "ticket.close", channel_id=channel_id):
+            # отвечаем сразу: дальше канал удалится и отвечать будет некуда
+            await interaction.response.send_message("Тикет закрывается...", ephemeral=True)
+
+            await _notify_applicant(guild, ticket)
+
+            embed = discord.Embed(
+                title=config.TICKET_CLOSED_LOG_TITLE,
+                color=discord.Color.dark_grey(),
+            )
+            embed.add_field(name="Тикет", value=ticket["topic"] or channel.name, inline=True)
+            embed.add_field(name="Закрыл", value=interaction.user.mention, inline=True)
+
+            outcome = await complete_terminal_action(
+                guild=guild,
+                channel=channel,
+                status=STATUS_CLOSED,
+                actor=interaction.user,
+                reason=None,
+                embed=embed,
+            )
+
+            if not outcome.ok:
+                await interaction.followup.send(outcome.reason, ephemeral=True)
+                return
+
+            if outcome.transcript_note and not outcome.transcript_note.startswith("✅"):
+                await interaction.followup.send(outcome.transcript_note, ephemeral=True)
+
+
+async def _notify_applicant(guild, ticket) -> None:
+    """Заявитель должен узнать о закрытии, а не молча потерять канал."""
+    if guild is None or ticket is None:
+        return
+    applicant = guild.get_member(ticket["user_id"])
+    if applicant is None:
+        return
+    try:
+        await applicant.send(config.DM_TICKET_CLOSED, allowed_mentions=mentions_for())
+    except discord.Forbidden:
+        pass  # личка закрыта — ожидаемо
+    except discord.HTTPException as error:
+        logger.warning(f"ticket.close outcome=dm_failed error_type={type(error).__name__}")

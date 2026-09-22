@@ -237,8 +237,9 @@ class TestDatabaseMigrations(unittest.TestCase):
 
             import database.migrations as migrations
 
-            importlib.reload(db_module)
-            importlib.reload(migrations)
+            # reload здесь ломает идентичность классов (SchemaError в других
+            # модулях становится «чужим»); шлюз сам замечает смену DB_PATH.
+            db_module.shutdown()
             migrations.migrate_schema()
 
             conn = db_module.get_db()

@@ -75,15 +75,37 @@ class TestCommandError(unittest.IsolatedAsyncioTestCase):
         ctx.send.assert_called_once()
 
     async def test_unexpected_error_goes_to_errors_thread(self):
+        """Issue #20: один безопасный ответ пользователю + запись в лог-центр."""
         ctx = self._make_ctx()
         ctx.guild = MagicMock()
+
+        with patch("main.send_to_log", new_callable=AsyncMock) as mock_log:
+            with patch("main.logger") as mock_logger:
+                await main_module.on_command_error(ctx, commands.CommandError("boom"))
+
+        mock_log.assert_awaited_once()
+        mock_logger.exception.assert_called_once()
+
+        # пользователю — ровно одно сообщение с кодом ошибки, без трейсбека
+        ctx.send.assert_called_once()
+        text = ctx.send.call_args.args[0]
+        self.assertNotIn("Traceback", text)
+        self.assertNotIn("boom", text)
+
+        # тот же correlation id виден и в логе, и пользователю
+        correlation_id = text.split("`")[1]
+        self.assertIn(correlation_id, mock_logger.exception.call_args.args[0])
+
+    async def test_unexpected_error_without_guild_still_answers_user(self):
+        ctx = self._make_ctx()
+        ctx.guild = None
 
         with patch("main.send_to_log", new_callable=AsyncMock) as mock_log:
             with patch("main.logger"):
                 await main_module.on_command_error(ctx, commands.CommandError("boom"))
 
-        ctx.send.assert_not_called()
-        mock_log.assert_awaited_once()
+        mock_log.assert_not_awaited()
+        ctx.send.assert_called_once()
 
 
 class TestBotConfiguration(unittest.TestCase):

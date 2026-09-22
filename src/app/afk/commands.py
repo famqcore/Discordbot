@@ -1,18 +1,24 @@
-from datetime import datetime
+"""Префиксные команды AFK."""
+
+from __future__ import annotations
 
 import discord
 from discord.ext import commands
 
 import config
+from utils import clock
+from utils.errors import log_event
 from utils.logcenter import LOG_KEY_AFK, send_to_log
+from utils.mentions import escape_user_text, mentions_for
 from utils.permissions import is_staff
 
 from .models import (
     format_duration,
     get_afk_user,
     get_user_stats,
-    remove_afk,
     remove_afk_nickname,
+    session_duration,
+    take_afk_session,
 )
 from .views import AfkMenuView, build_afk_embed
 
@@ -36,7 +42,7 @@ class AfkCog(commands.Cog):
     @commands.guild_only()
     @commands.cooldown(1, config.AFK_LIST_COOLDOWN_SECONDS, commands.BucketType.user)
     async def afk_list_command(self, ctx: commands.Context):
-        await ctx.send(embed=build_afk_embed(ctx.guild))
+        await ctx.send(embed=build_afk_embed(ctx.guild), allowed_mentions=mentions_for())
 
     @commands.command(name="afk_check")
     @commands.guild_only()
@@ -52,22 +58,23 @@ class AfkCog(commands.Cog):
             await ctx.send(embed=embed)
             return
 
-        afk_since = datetime.fromisoformat(row["afk_since"])
-        duration = int((datetime.now() - afk_since).total_seconds())
-        reason = row.get("afk_reason") or "Отошёл"
+        afk_since = clock.parse_db(row["afk_since"])
+        duration = session_duration(row)
+        reason = escape_user_text(row.get("afk_reason") or "Отошёл")
 
-        embed = discord.Embed(
-            title=member.display_name,
-            color=discord.Color.orange(),
-        )
+        embed = discord.Embed(title=member.display_name, color=discord.Color.orange())
         embed.add_field(name=config.AFK_FIELD_STATUS, value=config.AFK_AFK_STATUS, inline=False)
         embed.add_field(name=config.AFK_FIELD_REASON, value=reason, inline=False)
-        embed.add_field(name=config.AFK_FIELD_LEFT, value=afk_since.strftime("%H:%M"), inline=True)
+        embed.add_field(
+            name=config.AFK_FIELD_LEFT,
+            value=clock.to_local(afk_since).strftime("%H:%M") if afk_since else "—",
+            inline=True,
+        )
         embed.add_field(
             name=config.AFK_FIELD_DURATION, value=format_duration(duration), inline=True
         )
 
-        await ctx.send(embed=embed)
+        await ctx.send(embed=embed, allowed_mentions=mentions_for())
 
     @commands.command(name="afk_stats")
     @commands.guild_only()
@@ -99,7 +106,7 @@ class AfkCog(commands.Cog):
             inline=False,
         )
 
-        await ctx.send(embed=embed)
+        await ctx.send(embed=embed, allowed_mentions=mentions_for())
 
     @commands.command(name=config.CMD_AFK_REMOVE)
     @commands.guild_only()
@@ -110,21 +117,30 @@ class AfkCog(commands.Cog):
             await ctx.send(config.AFK_NO_PERMISSION)
             return
 
-        row = get_afk_user(member.id, ctx.guild.id)
-        duration = remove_afk(member.id, ctx.guild.id)
-        if duration is None:
+        session = take_afk_session(member.id, ctx.guild.id)
+        if session is None:
             await ctx.send(config.AFK_CHECKED_NOT_AFK)
             return
 
-        await remove_afk_nickname(member, row.get("original_nick") if row else None)
-
-        embed = discord.Embed(
-            title=config.AFK_LOG_REMOVED_TITLE,
-            color=discord.Color.green(),
+        await remove_afk_nickname(
+            member,
+            session.get("original_nick"),
+            nick_applied=bool(session.get("nick_applied")),
         )
+
+        duration = session["duration_seconds"]
+        embed = discord.Embed(title=config.AFK_LOG_REMOVED_TITLE, color=discord.Color.green())
         embed.add_field(name="Пользователь", value=member.mention, inline=True)
         embed.add_field(name="Отсутствовал", value=format_duration(duration), inline=True)
         embed.add_field(name="Снял", value=ctx.author.mention, inline=True)
 
-        await ctx.send(embed=embed)
+        await ctx.send(embed=embed, allowed_mentions=mentions_for())
         await send_to_log(ctx.guild, LOG_KEY_AFK, embed=embed)
+        log_event(
+            "afk.removed",
+            guild_id=ctx.guild.id,
+            user_id=member.id,
+            actor="moderator",
+            actor_id=ctx.author.id,
+            duration_seconds=duration,
+        )

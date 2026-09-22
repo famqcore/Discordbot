@@ -5,14 +5,18 @@
 пинги остаются адресными.
 """
 
-import asyncio
 import unittest
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import discord
+
 import config
-from afk.events import setup_afk_events
+from afk.events import AfkEventsCog
 from afk.views import AfkSetModal
+from tests.support import FakeChannel, FakeGuild, FakeInteraction, FakeMember
 from tickets.decision import ACCEPT, DecisionReasonModal
+from tickets.workflow import TerminalOutcome
+from utils import clock, ratelimit
 
 ATTACK_TEXT = "@everyone @here <@123456789012345678> <@&987654321098765432>"
 
@@ -25,194 +29,193 @@ def assert_no_pings(test_case, content):
     test_case.assertNotIn("<@&987654321098765432>", content)
 
 
-class TestAfkAutoReplyPingSafety(unittest.TestCase):
+class AfkAutoReplyPingSafetyTestCase(unittest.IsolatedAsyncioTestCase):
+    """Причина AFK попадает в публичный автоответ — она обязана быть обезврежена."""
+
     def setUp(self):
-        self.loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(self.loop)
-        self.bot = MagicMock()
-        self.bot.process_commands = AsyncMock()
-        setup_afk_events(self.bot)
-        self.on_message = self.bot.event.call_args_list[0][0][0]
+        ratelimit.reset()
+        self.addCleanup(ratelimit.reset)
+        self.cog = AfkEventsCog(MagicMock())
 
-    def tearDown(self):
-        self.loop.close()
-
-    def _make_message(self):
-        message = MagicMock()
-        message.author.bot = False
-        message.guild = MagicMock()
-        message.guild.id = 123
+    async def _run(self, reason):
+        guild = FakeGuild(guild_id=123)
+        target = FakeMember(user_id=200, name="afk-user")
+        message = MagicMock(spec=discord.Message)
+        message.author = FakeMember(user_id=100, name="author")
+        message.guild = guild
+        message.channel = FakeChannel(channel_id=55, guild=guild)
         message.content = "эй, ты тут?"
-        message.author.id = 100
-        mention = MagicMock()
-        mention.id = 200
-        mention.mention = "<@200>"
-        message.mentions = [mention]
-        message.channel = MagicMock()
-        message.channel.send = AsyncMock()
-        return message, mention
+        message.mentions = [target]
 
-    def _run(self, reason):
-        message, mention = self._make_message()
-        row = {"afk_since": "2024-01-01T10:00:00", "afk_reason": reason}
-        with patch("afk.events.get_afk_user", return_value=row):
+        row = {
+            "user_id": 200,
+            "afk_reason": reason,
+            "afk_since": clock.to_db(clock.shift(clock.utcnow(), minutes=-10)),
+        }
+        with patch("afk.events.get_afk_users", return_value={200: row}):
             with patch("afk.events.check_and_reply", return_value=True):
-                self.loop.run_until_complete(self.on_message(message))
-        return message, mention
+                await self.cog.on_message(message)
+        return message, target
 
-    def test_everyone_in_reason_cannot_ping(self):
-        message, _ = self._run("@everyone")
-        content = message.channel.send.call_args.args[0]
-        self.assertNotIn("@everyone", content)
+    async def test_everyone_in_reason_cannot_ping(self):
+        message, _ = await self._run("@everyone")
 
-    def test_here_in_reason_cannot_ping(self):
-        message, _ = self._run("@here собирайтесь")
-        content = message.channel.send.call_args.args[0]
-        self.assertNotIn("@here", content)
+        self.assertNotIn("@everyone", message.channel.send.await_args.args[0])
 
-    def test_role_mention_in_reason_cannot_ping(self):
-        message, _ = self._run("роль <@&987654321098765432>")
-        content = message.channel.send.call_args.args[0]
-        self.assertNotIn("<@&987654321098765432>", content)
+    async def test_here_in_reason_cannot_ping(self):
+        message, _ = await self._run("@here собирайтесь")
 
-    def test_user_mention_in_reason_cannot_ping(self):
-        message, _ = self._run("<@123456789012345678> иди сюда")
-        content = message.channel.send.call_args.args[0]
-        self.assertNotIn("<@123456789012345678>", content)
+        self.assertNotIn("@here", message.channel.send.await_args.args[0])
 
-    def test_all_attacks_combined_neutralized(self):
-        message, _ = self._run(ATTACK_TEXT)
-        assert_no_pings(self, message.channel.send.call_args.args[0])
+    async def test_role_mention_in_reason_cannot_ping(self):
+        message, _ = await self._run("роль <@&987654321098765432>")
 
-    def test_allowed_mentions_addressed_to_afk_user_only(self):
-        message, mention = self._run(ATTACK_TEXT)
-        allowed = message.channel.send.call_args.kwargs["allowed_mentions"]
+        self.assertNotIn("<@&987654321098765432>", message.channel.send.await_args.args[0])
+
+    async def test_user_mention_in_reason_cannot_ping(self):
+        message, _ = await self._run("<@123456789012345678> иди сюда")
+
+        self.assertNotIn("<@123456789012345678>", message.channel.send.await_args.args[0])
+
+    async def test_all_attacks_combined_neutralized(self):
+        message, _ = await self._run(ATTACK_TEXT)
+
+        assert_no_pings(self, message.channel.send.await_args.args[0])
+
+    async def test_allowed_mentions_addressed_to_afk_user_only(self):
+        message, target = await self._run(ATTACK_TEXT)
+
+        allowed = message.channel.send.await_args.kwargs["allowed_mentions"]
         self.assertFalse(allowed.everyone)
         self.assertEqual(allowed.roles, [])
-        self.assertEqual(allowed.users, [mention])
+        self.assertEqual(allowed.users, [target])
 
-    def test_service_mention_of_afk_user_preserved(self):
-        message, mention = self._run("Отошёл")
-        content = message.channel.send.call_args.args[0]
+    async def test_service_mention_of_afk_user_preserved(self):
+        message, _ = await self._run("Отошёл")
+
         # служебный пинг AFK-пользователя — задуманное поведение, он остаётся
-        self.assertIn("<@200>", content)
+        self.assertIn("<@200>", message.channel.send.await_args.args[0])
 
 
-class TestAfkSetModalPingSafety(unittest.IsolatedAsyncioTestCase):
+class AfkSetModalPingSafetyTestCase(unittest.IsolatedAsyncioTestCase):
     async def test_reason_escaped_in_confirmation(self):
-        member = MagicMock()
-        member.id = 456
-        member.edit = AsyncMock()
-        modal = AfkSetModal(member, 123, MagicMock())
-        modal.reason = MagicMock()
-        modal.reason.value = ATTACK_TEXT
-        modal.duration = MagicMock()
-        modal.duration.value = "1 час"
+        guild = FakeGuild(guild_id=123)
+        member = FakeMember(user_id=456, name="tester")
+        guild.add_member(member)
 
-        interaction = MagicMock()
-        interaction.response = MagicMock()
-        interaction.response.send_message = AsyncMock()
+        modal = AfkSetModal(member, 123, guild)
+        modal.reason = MagicMock(value=ATTACK_TEXT)
+        modal.duration = MagicMock(value="1 час")
 
-        with patch("afk.models.set_afk"):
-            with patch("afk.models.add_afk_nickname"):
-                with patch("afk.views.send_to_log", new_callable=AsyncMock):
-                    await modal.on_submit(interaction)
+        interaction = FakeInteraction(user=member, guild=guild)
 
-        content = interaction.response.send_message.call_args.args[0]
-        assert_no_pings(self, content)
-        allowed = interaction.response.send_message.call_args.kwargs["allowed_mentions"]
+        with patch("afk.views.set_afk", return_value={"created": True, "updated": False}):
+            with patch("afk.views.get_afk_user", return_value=None):
+                with patch("afk.views.add_afk_nickname", new_callable=AsyncMock, return_value=True):
+                    with patch("afk.views.mark_nick_applied"):
+                        with patch("afk.views.send_to_log", new_callable=AsyncMock):
+                            await modal.on_submit(interaction)
+
+        call = interaction.response.send_message.await_args
+        assert_no_pings(self, call.args[0])
+        allowed = call.kwargs["allowed_mentions"]
         self.assertFalse(allowed.everyone)
         self.assertEqual(allowed.roles, [])
         self.assertEqual(allowed.users, [])
 
+    async def test_reason_escaped_in_log_embed(self):
+        guild = FakeGuild(guild_id=123)
+        member = FakeMember(user_id=456)
+        modal = AfkSetModal(member, 123, guild)
+        modal.reason = MagicMock(value=ATTACK_TEXT)
+        modal.duration = MagicMock(value="1 час")
+        interaction = FakeInteraction(user=member, guild=guild)
 
-class TestDecisionReasonPingSafety(unittest.IsolatedAsyncioTestCase):
+        with patch("afk.views.set_afk", return_value={"created": True, "updated": False}):
+            with patch("afk.views.get_afk_user", return_value=None):
+                with patch("afk.views.add_afk_nickname", new_callable=AsyncMock, return_value=True):
+                    with patch("afk.views.mark_nick_applied"):
+                        with patch("afk.views.send_to_log", new_callable=AsyncMock) as mock_log:
+                            await modal.on_submit(interaction)
+
+        embed = mock_log.await_args.kwargs["embed"]
+        reason_field = next(f for f in embed.fields if f.name == "Причина")
+        assert_no_pings(self, reason_field.value)
+
+
+class DecisionReasonPingSafetyTestCase(unittest.IsolatedAsyncioTestCase):
     async def test_reason_escaped_everywhere_and_mentions_addressed(self):
-        channel = MagicMock()
-        channel.id = 123
-        channel.send = AsyncMock()
-        channel.delete = AsyncMock()
+        guild = FakeGuild(guild_id=321)
+        applicant = FakeMember(user_id=456, name="applicant")
+        guild.add_member(applicant)
+        moderator = FakeMember(user_id=999, name="mod")
+        channel = FakeChannel(channel_id=123, guild=guild)
 
         modal = DecisionReasonModal(channel, ACCEPT)
-        modal.reason = MagicMock()
-        modal.reason.value = ATTACK_TEXT
+        modal.reason = MagicMock(value=ATTACK_TEXT)
 
-        applicant = MagicMock()
-        applicant.mention = "<@456>"
-        applicant.send = AsyncMock()
+        interaction = FakeInteraction(user=moderator, guild=guild, channel=channel)
 
-        guild = MagicMock()
-        guild.get_member = MagicMock(return_value=applicant)
-
-        interaction = MagicMock()
-        interaction.guild = guild
-        interaction.user = MagicMock()
-        interaction.user.mention = "<@999>"
-        interaction.response = MagicMock()
-        interaction.response.send_message = AsyncMock()
-
-        with patch("tickets.decision.update_ticket_status", return_value=True):
-            with patch("tickets.decision.get_ticket", return_value={"user_id": 456}):
-                with patch("tickets.decision.send_to_log", new_callable=AsyncMock):
-                    with patch("tickets.decision.add_log_message_id"):
-                        await modal.on_submit(interaction)
+        with patch("tickets.decision.ticket_for_channel", return_value={"user_id": 456}):
+            with patch("tickets.decision.claim_ticket", return_value=True):
+                with patch(
+                    "tickets.decision.complete_terminal_action",
+                    new_callable=AsyncMock,
+                    return_value=TerminalOutcome(ok=True),
+                ) as mock_complete:
+                    await modal.on_submit(interaction)
 
         # сообщение в канал тикета
-        content = channel.send.call_args.args[0]
+        content = channel.send.await_args.args[0]
         assert_no_pings(self, content)
-        allowed = channel.send.call_args.kwargs["allowed_mentions"]
+        allowed = channel.send.await_args.kwargs["allowed_mentions"]
         self.assertFalse(allowed.everyone)
         self.assertEqual(allowed.roles, [])
         self.assertEqual(allowed.users, [applicant])
 
         # личное сообщение заявителю
-        dm_content = applicant.send.call_args.args[0]
+        dm_content = applicant.send.await_args.args[0]
         assert_no_pings(self, dm_content)
+        dm_allowed = applicant.send.await_args.kwargs["allowed_mentions"]
+        self.assertFalse(dm_allowed.everyone)
+
+        # embed в лог-центр
+        embed = mock_complete.await_args.kwargs["embed"]
+        reason_field = next(f for f in embed.fields if f.name == "Причина")
+        assert_no_pings(self, reason_field.value)
 
 
-class TestCreateTicketServicePing(unittest.IsolatedAsyncioTestCase):
+class CreateTicketServicePingTestCase(unittest.IsolatedAsyncioTestCase):
     """Пинг рекрутёров в новом тикете — адресный: только нужные роли и заявитель."""
 
     async def test_recruiter_ping_is_addressed(self):
-        recruiter = MagicMock()
+        guild = FakeGuild(guild_id=321)
+        member = FakeMember(user_id=123, name="Tester")
+        guild.add_member(member)
+
+        recruiter = MagicMock(spec=discord.Role)
         recruiter.id = 10
         recruiter.mention = "<@&10>"
 
-        interaction = MagicMock()
-        interaction.guild = MagicMock()
-        interaction.guild.id = 321
-        interaction.guild.create_text_channel = AsyncMock()
-        interaction.guild.create_category = AsyncMock(return_value=MagicMock())
-        interaction.guild.default_role = MagicMock()
-        interaction.guild.me = MagicMock()
-        interaction.guild.roles = []
+        channel = FakeChannel(channel_id=456, name="rp-tester", guild=guild)
+        guild.create_text_channel = AsyncMock(return_value=channel)
+        guild.me.top_role = MagicMock()
 
-        member = MagicMock()
-        member.name = "Tester"
-        member.id = 123
-        member.mention = "<@123>"
-        member.add_roles = AsyncMock()
-        member.create_dm = AsyncMock(return_value=MagicMock(send=AsyncMock()))
-        interaction.user = member
-
-        interaction.response = AsyncMock()
+        interaction = FakeInteraction(user=member, guild=guild)
         interaction.edit_original_response = AsyncMock()
 
-        channel = MagicMock()
-        channel.mention = "<#456>"
-        channel.name = "rp-tester"
-        channel.id = 456
-        channel.send = AsyncMock()
-        interaction.guild.create_text_channel.return_value = channel
-
-        def fake_get_role(guild, role_id, name=None):
+        def fake_get_role(_guild, _role_id, name=None):
             return recruiter if name == config.ROLE_RECRUITER else None
 
         with patch("tickets.create_ticket.get_role", side_effect=fake_get_role):
-            with patch("tickets.create_ticket.save_ticket"):
-                with patch("tickets.create_ticket.get_open_ticket_for_user", return_value=None):
-                    with patch("tickets.create_ticket.send_to_log", new_callable=AsyncMock):
-                        with patch("tickets.create_ticket.add_log_message_id"):
+            with patch("tickets.create_ticket.get_category", return_value=MagicMock()):
+                with patch("tickets.create_ticket.save_ticket"):
+                    with patch("tickets.create_ticket.get_open_ticket_for_user", return_value=None):
+                        with patch(
+                            "tickets.create_ticket.send_to_log",
+                            new_callable=AsyncMock,
+                            return_value=None,
+                        ):
                             with patch(
                                 "tickets.create_ticket.FullTicketView", return_value=MagicMock()
                             ):
@@ -225,7 +228,7 @@ class TestCreateTicketServicePing(unittest.IsolatedAsyncioTestCase):
                                     {"Никнейм": MagicMock(value="TestNick")},
                                 )
 
-        ping_call = channel.send.call_args_list[1]
+        ping_call = channel.send.await_args_list[1]
         self.assertIn("<@&10>", ping_call.args[0])
         allowed = ping_call.kwargs["allowed_mentions"]
         self.assertFalse(allowed.everyone)

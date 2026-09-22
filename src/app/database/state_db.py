@@ -4,21 +4,22 @@
 после перезапуска бот находит их по сохранённому ID и не плодит дубликаты.
 """
 
-from .db import get_db
+from __future__ import annotations
+
+import sqlite3
+
+from . import db
 
 
 def get_state(key: str) -> str | None:
-    conn = get_db()
-    try:
-        row = conn.execute("SELECT value FROM bot_state WHERE key = ?", (key,)).fetchone()
-        return row["value"] if row else None
-    finally:
-        conn.close()
+    row = db.run(
+        lambda conn: conn.execute("SELECT value FROM bot_state WHERE key = ?", (key,)).fetchone()
+    )
+    return row["value"] if row else None
 
 
 def set_state(key: str, value: str) -> None:
-    conn = get_db()
-    try:
+    def operation(conn: sqlite3.Connection) -> None:
         conn.execute(
             """
             INSERT INTO bot_state (key, value) VALUES (?, ?)
@@ -26,15 +27,12 @@ def set_state(key: str, value: str) -> None:
             """,
             (key, value),
         )
-        conn.commit()
-    finally:
-        conn.close()
+
+    db.run(operation, write=True)
 
 
 def delete_state(key: str) -> None:
-    conn = get_db()
-    try:
-        conn.execute("DELETE FROM bot_state WHERE key = ?", (key,))
-        conn.commit()
-    finally:
-        conn.close()
+    db.run(
+        lambda conn: conn.execute("DELETE FROM bot_state WHERE key = ?", (key,)),
+        write=True,
+    )
