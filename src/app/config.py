@@ -31,7 +31,7 @@ LOG_DIR = os.path.join(os.path.dirname(__file__), "logs")
 # ---------------------------------------------------------------------------
 
 # Категория для создания тикетов
-TICKETS_CATEGORY_NAME = "𝙄𝙣𝙫𝙖𝙞𝙩 𝙁𝙖𝙢𝙞𝙡𝙮"
+TICKETS_CATEGORY_NAME = "FAMQCORE • заявки"
 TICKETS_CATEGORY_ID = _int_env("TICKETS_CATEGORY_ID")
 
 # Роли
@@ -96,42 +96,37 @@ LOG_THREAD_IDS = {
 
 # Команды
 CMD_PREFIX = "!"
-CMD_REGENT = "regent"
+CMD_FAMQCORE = "famqcore"
 CMD_STATS = "stats"
 CMD_HISTORY = "history"
 CMD_AFK_REMOVE = "afk_remove"
 CMD_DELETE_USER_DATA = "delete_user_data"
 
 # Rate limits (commands.cooldown): значения в секундах.
-REGENT_COMMAND_COOLDOWN_SECONDS = 30
+FAMQCORE_COMMAND_COOLDOWN_SECONDS = 30
 AFK_COMMAND_COOLDOWN_SECONDS = 10
 AFK_LIST_COOLDOWN_SECONDS = 10
 AFK_LOOKUP_COOLDOWN_SECONDS = 10
 TICKET_BUTTON_COOLDOWN_SECONDS = 5
 
 # Тексты
-DM_MESSAGE = "Вы подали заявку в клуб Regent, ожидайте — скоро её рассмотрят ⏳."
+DM_MESSAGE = "Вы подали заявку в FAMQCORE, ожидайте — скоро её рассмотрят ⏳."
 
 TICKET_RP_TITLE = "RP ЗАЯВКА"
 TICKET_CAPT_TITLE = "CAPT ЗАЯВКА"
 
-REGENT_EMBED_TITLE = "Regent FamQ"
+FAMQCORE_EMBED_TITLE = "FAMQCORE"
 PRIVACY_NOTICE = (
     "Отправляя заявку, вы соглашаетесь, что ответы формы и сообщения тикета "
     "сохраняются для рассмотрения администрацией этого Discord-сервера. "
     "Удаление или анонимизацию можно запросить у администратора."
 )
 
-REGENT_EMBED_DESCRIPTION = (
-    "Заявка в Regent FamQ\n\n"
-    "Заявки рассматриваются только на сервере Orlando.\n"
-    "Уведомление о приглашении на обзвон отправляется в ваш тикет.\n\n"
-    "**Срок рассмотрения:** до 48 часов.\n"
-    "**Важно:** неполная заявка будет автоматически ОТКЛОНЕНА.\n\n"
-    "**Требования к откатам:**\n"
-    "Арена — не более 1 недели (не менее 5 минут).\n"
-    "Откаты каптов и MCL — не более 60 дней (по желанию).\n"
-    "**Нарушение условий = автоматический отказ.**\n\n"
+FAMQCORE_EMBED_DESCRIPTION = (
+    "Добро пожаловать в FAMQCORE.\n\n"
+    "Выберите тип заявки и заполните форму — команда рассмотрит её в приватном тикете.\n"
+    "Приглашение на обзвон, решение и дополнительная информация появятся в вашем тикете.\n\n"
+    "**Важно:** заполняйте форму внимательно и указывайте актуальные данные.\n\n"
     f"**Данные:** {PRIVACY_NOTICE}"
 )
 RP_FIELDS = [
@@ -140,7 +135,7 @@ RP_FIELDS = [
     ("Семьи в которых вы состояли", "Перечислите все семьи, и почему ушли?", True, 300),
     ("Почему именно наша семья", "Потому что ...", True, 500),
     (
-        "Средний онлайн в день (пример: 12:00-17:00)",
+        "Средний онлайн (например, 12:00–17:00)",
         "Сколько часов играете / в какое время",
         True,
         100,

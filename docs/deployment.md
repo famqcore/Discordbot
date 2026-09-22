@@ -27,8 +27,8 @@ docker compose up -d --build   # пересобрать и запустить
 ## Голый Docker
 
 ```bash
-docker build -t regent-bot .
-docker run -d --name regent-bot --env-file src/app/.env regent-bot
+docker build -t famqcore-bot .
+docker run -d --name famqcore-bot --env-file src/app/.env famqcore-bot
 ```
 
 Без volumes данные умрут вместе с контейнером, так что для прода лучше compose.
@@ -45,9 +45,9 @@ docker run -d --name regent-bot --env-file src/app/.env regent-bot
 
 Честный список, все пункты заведены в трекере:
 
-- Контейнер работает от root - issue #45.
+- Для production рекомендуется запускать контейнер от непривилегированного пользователя.
 - При старте бот валидирует конфигурацию и наличие `TOKEN`; без корректного `.env` процесс завершится с ошибкой.
-- Healthcheck отсутствует, `unhealthy` контейнер не отловить автоматом, #45.
+- Добавьте healthcheck в свою инфраструктуру, если требуется автоматическое обнаружение сбоев.
 - Тесты в production-контейнере не запускаются: их выполняет CI до деплоя.
 
 ## Обновление версии
@@ -67,7 +67,7 @@ docker compose up -d --build
 docker compose exec bot cp /app/database/database.db /app/database/database-backup-$(date +%F).db
 ```
 
-Файл окажется в volume `bot_data`, оттуда его можно забрать на хост. Автоматика и политика хранения - task #98. До её закрытия советуем делать копию раз в неделю руками.
+Файл окажется в volume `bot_data`, оттуда его можно забрать на хост. Настройте автоматические бэкапы и период хранения в соответствии с правилами вашего сообщества.
 
 Восстановление: остановить бота, положить файл обратно как `database.db`, запустить.
 
@@ -75,4 +75,4 @@ docker compose exec bot cp /app/database/database.db /app/database/database-back
 
 Два потока: `docker compose logs` и файл `logs/bot.log` (ротация 3x5 МБ). При странном поведении бота первым делом смотрите оба.
 
-Если что-то совсем развалилось - пишите с куском лога: Discord **yangblya**, Telegram [@yyangov](https://t.me/yyangov).
+Если проблема не решается, приложите безопасный фрагмент лога к [новому Issue](https://github.com/famqcore/Discordbot/issues). Не публикуйте токены и персональные данные.

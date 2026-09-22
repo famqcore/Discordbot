@@ -11,8 +11,8 @@
 ## 2. Клонирование и зависимости
 
 ```bash
-git clone https://github.com/yyangdev/majestick-famq-discord-bot.git
-cd majestick-famq-discord-bot/src/app
+git clone https://github.com/famqcore/Discordbot.git
+cd Discordbot/src/app
 pip install -r requirements.txt
 ```
 
@@ -58,7 +58,7 @@ TOKEN=ваш_токен
 
 Категория для тикетов:
 
-- `𝙄𝙣𝙫𝙖𝙞𝙩 𝙁𝙖𝙢𝙞𝙡𝙮` (TICKETS_CATEGORY_NAME)
+- `FAMQCORE • заявки` (TICKETS_CATEGORY_NAME)
 
 Роли:
 
@@ -88,7 +88,7 @@ python main.py
 Перед подключением бот проверяет конфигурацию и наличие токена. При успешном старте в консоли появится сообщение:
 
 ```
-Бот Regent Bot#0000 запущен
+Бот FAMQCORE Bot#0000 запущен
 ```
 
 Автотесты не запускаются внутри production-процесса. Перед первым стартом и перед обновлением выполните их отдельно:
@@ -99,7 +99,7 @@ TOKEN=dummy python -m unittest discover -s tests -v
 
 ## 8. Проверка
 
-1. Напишите в любом канале `!regent` - бот ответит панелью с кнопками RP и CAPT.
+1. Напишите в любом канале `!famqcore` - бот ответит панелью с кнопками RP и CAPT.
 2. Подайте тестовую заявку - должен появиться приватный канал.
 3. Напишите `!afk` - появится меню AFK.
 

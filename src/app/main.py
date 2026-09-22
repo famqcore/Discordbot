@@ -14,7 +14,7 @@ intents.message_content = True
 intents.members = True
 
 
-class RegentBot(commands.Bot):
+class FamqCoreBot(commands.Bot):
     async def setup_hook(self):
         # setup_hook вызывается один раз при старте; on_ready — при каждом
         # переподключении, поэтому загрузка расширений живёт только здесь
@@ -30,7 +30,7 @@ class RegentBot(commands.Bot):
         self.add_view(AfkMenuView())
 
 
-bot = RegentBot(command_prefix=config.CMD_PREFIX, intents=intents)
+bot = FamqCoreBot(command_prefix=config.CMD_PREFIX, intents=intents)
 
 
 @bot.event

@@ -36,8 +36,8 @@ class TestTicketsCog(unittest.TestCase):
     def test_cog_name(self):
         self.assertEqual(self.cog.qualified_name, "TicketsCog")
 
-    def test_regent_command_exists(self):
-        self.assertTrue(hasattr(self.cog, "regent_apply"))
+    def test_famqcore_command_exists(self):
+        self.assertTrue(hasattr(self.cog, "famqcore_apply"))
 
     def test_stats_command_exists(self):
         self.assertTrue(hasattr(self.cog, "show_stats"))
@@ -49,7 +49,7 @@ class TestTicketsCog(unittest.TestCase):
         self.assertTrue(hasattr(self.cog, "delete_user_data"))
 
 
-class TestRegentCommand(unittest.TestCase):
+class TestFamqCoreCommand(unittest.TestCase):
     def setUp(self):
         self.loop = asyncio.new_event_loop()
         asyncio.set_event_loop(self.loop)
@@ -59,17 +59,17 @@ class TestRegentCommand(unittest.TestCase):
     def tearDown(self):
         self.loop.close()
 
-    def test_regent_sends_embed(self):
+    def test_famqcore_sends_embed(self):
         ctx = MagicMock()
         ctx.send = AsyncMock()
 
-        self.loop.run_until_complete(self.cog.regent_apply.callback(self.cog, ctx))
+        self.loop.run_until_complete(self.cog.famqcore_apply.callback(self.cog, ctx))
 
         ctx.send.assert_called_once()
         call_args = ctx.send.call_args
         embed = call_args.kwargs.get("embed") or call_args.args[0]
         self.assertIsInstance(embed, discord.Embed)
-        self.assertEqual(embed.title, config.REGENT_EMBED_TITLE)
+        self.assertEqual(embed.title, config.FAMQCORE_EMBED_TITLE)
 
 
 class TestStatsCommand(unittest.TestCase):

@@ -1,5 +1,5 @@
 """
-Интеграционные тесты end-to-end для Regent FamQ Bot.
+Интеграционные тесты end-to-end для FAMQCORE Bot.
 Проверяют полный цикл от команды до ответа бота.
 """
 
@@ -14,25 +14,25 @@ from tickets.commands import TicketsCog, TicketTypeView
 
 
 class TestIntegrationTicketsFlow(unittest.IsolatedAsyncioTestCase):
-    """Интеграция: !regent → Embed → кнопка RP → модалка → создание тикета"""
+    """Интеграция: !famqcore → Embed → кнопка RP → модалка → создание тикета"""
 
-    async def test_full_regent_flow(self):
+    async def test_full_famqcore_flow(self):
         bot = MagicMock()
         cog = TicketsCog(bot)
         ctx = MagicMock()
         ctx.send = AsyncMock()
 
-        # Шаг 1: Команда !regent отправляет Embed с кнопками
-        await cog.regent_apply.callback(cog, ctx)
+        # Шаг 1: Команда !famqcore отправляет Embed с кнопками
+        await cog.famqcore_apply.callback(cog, ctx)
         ctx.send.assert_called_once()
         call_args = ctx.send.call_args
         embed = call_args.kwargs.get("embed") or call_args.args[0]
         view = call_args.kwargs.get("view")
         self.assertIsInstance(embed, discord.Embed)
         self.assertIsInstance(view, TicketTypeView)
-        self.assertEqual(embed.title, config.REGENT_EMBED_TITLE)
+        self.assertEqual(embed.title, config.FAMQCORE_EMBED_TITLE)
 
-    async def test_regent_button_to_modal(self):
+    async def test_famqcore_button_to_modal(self):
         view = TicketTypeView()
         interaction = MagicMock()
         interaction.response = MagicMock()

@@ -43,13 +43,13 @@ class TestConfig(unittest.TestCase):
 
     def test_commands(self):
         self.assertEqual(config.CMD_PREFIX, "!")
-        self.assertEqual(config.CMD_REGENT, "regent")
+        self.assertEqual(config.CMD_FAMQCORE, "famqcore")
         self.assertEqual(config.CMD_STATS, "stats")
         self.assertEqual(config.CMD_HISTORY, "history")
 
     def test_dm_message(self):
         self.assertIsInstance(config.DM_MESSAGE, str)
-        self.assertIn("Regent", config.DM_MESSAGE)
+        self.assertIn("FAMQCORE", config.DM_MESSAGE)
 
     def test_ticket_titles(self):
         self.assertIsInstance(config.TICKET_RP_TITLE, str)
@@ -57,10 +57,10 @@ class TestConfig(unittest.TestCase):
         self.assertTrue(len(config.TICKET_RP_TITLE) > 0)
         self.assertTrue(len(config.TICKET_CAPT_TITLE) > 0)
 
-    def test_regent_embed(self):
-        self.assertIsInstance(config.REGENT_EMBED_TITLE, str)
-        self.assertIsInstance(config.REGENT_EMBED_DESCRIPTION, str)
-        self.assertIn("Regent", config.REGENT_EMBED_TITLE)
+    def test_famqcore_embed(self):
+        self.assertIsInstance(config.FAMQCORE_EMBED_TITLE, str)
+        self.assertIsInstance(config.FAMQCORE_EMBED_DESCRIPTION, str)
+        self.assertIn("FAMQCORE", config.FAMQCORE_EMBED_TITLE)
 
     def test_rp_fields_is_list(self):
         self.assertIsInstance(config.RP_FIELDS, list)

@@ -1,56 +1,74 @@
-# Regent FamQ Bot
+<div align="center">
+  <img src="docs/assets/logo.png" alt="FAMQCORE" width="720">
 
-[![CI](https://github.com/yyangdev/majestick-famq-discord-bot/actions/workflows/tests.yml/badge.svg)](https://github.com/yyangdev/majestick-famq-discord-bot/actions/workflows/tests.yml)
-[![Python 3.10+](https://img.shields.io/badge/Python-3.10%2B-3776AB?logo=python&logoColor=white)](https://www.python.org/)
-[![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
+  <h1>FAMQCORE Bot</h1>
+  <p><strong>Discord-бот для заявок, рекрутинга, AFK-статусов и модерации игровых сообществ.</strong></p>
 
-Discord-бот для игровой семьи Regent на проекте Majestic RP. Принимает заявки на вступление, ведёт учёт AFK-статусов и статистику по рекрутингу.
+  [![CI](https://github.com/famqcore/Discordbot/actions/workflows/tests.yml/badge.svg)](https://github.com/famqcore/Discordbot/actions/workflows/tests.yml)
+  [![Python 3.10+](https://img.shields.io/badge/Python-3.10%2B-3776AB?logo=python&logoColor=white)](https://www.python.org/)
+  [![discord.py](https://img.shields.io/badge/discord.py-2.x-5865F2?logo=discord&logoColor=white)](https://discordpy.readthedocs.io/)
+  [![License: MIT](https://img.shields.io/badge/License-MIT-43a047.svg)](LICENSE)
+</div>
 
-> **Проект в beta.** Основные сценарии работают, но до мульти-серверного использования необходимо завершить изоляцию данных и миграции. Актуальные блокеры собраны в [epic #108](https://github.com/yyangdev/majestick-famq-discord-bot/issues/108).
+**FAMQCORE Bot** автоматизирует путь участника от первой заявки до работы в сообществе: приватные тикеты, решения рекрутёров, централизованные логи, AFK-учёт и статистика. Бот изолирует данные между Discord-серверами и настраивается по ID ролей и каналов — переименование объектов не ломает работу.
 
-## Что умеет бот
+> Проект находится в активной разработке. Используйте [Issues](https://github.com/famqcore/Discordbot/issues), чтобы сообщить о проблеме или предложить улучшение.
 
-- Тикет-система с двумя типами заявок: RP и CAPT
-- AFK-система: статус с причиной и временем возврата, автоответ на упоминания и статистика
-- Команды `!stats` и `!history` для администраторов; в будущем их заменит веб-панель
+## Возможности
+
+| Возможность | Что получает сообщество |
+|---|---|
+| 🎫 **Заявки и тикеты** | Две формы заявок, приватные каналы, история решений и защита от дубликатов. |
+| 🛡️ **Рекрутинг** | Роли, действия «принять / отклонить», причины решений и вызов на обзвон. |
+| 💤 **AFK-система** | Причина и время возврата, автоответ на упоминания, префикс ника и статистика. |
+| 📊 **Статистика** | Сводка по заявкам, история тикетов и показатели AFK. |
+| 🔒 **Изоляция данных** | Заявки и AFK-данные разделены по `guild_id`; пользовательские данные можно анонимизировать. |
+| 🧰 **Эксплуатация** | Docker, SQLite-миграции, логи с ротацией, тесты, Ruff и GitHub Actions. |
 
 ## Быстрый старт
 
 ```bash
-git clone https://github.com/yyangdev/majestick-famq-discord-bot.git
-cd majestick-famq-discord-bot/src/app
-pip install -r requirements.txt
-cp .env.example .env   # вписать токен бота
+git clone https://github.com/famqcore/Discordbot.git
+cd Discordbot/src/app
+python -m pip install -r requirements.txt
+cp .env.example .env
+# Откройте .env и добавьте токен Discord-бота
 python main.py
 ```
 
-Полная инструкция, включая настройку сервера Discord и прав бота: [docs/setup.md](docs/setup.md).
+Перед запуском включите **Message Content Intent** и **Server Members Intent** в Discord Developer Portal. Полный пошаговый сценарий — в [руководстве по установке](docs/setup.md).
+
+## Главные команды
+
+| Команда | Назначение | Доступ |
+|---|---|---|
+| `!famqcore` | Открыть панель подачи заявки | участники сервера |
+| `!afk` | Установить AFK-статус | участники сервера |
+| `!afk_list` | Показать список AFK | участники сервера |
+| `!stats` | Показать статистику заявок | администраторы |
+| `!history` | Показать историю тикетов | администраторы |
+
+Остальные команды, кнопки и права описаны в [документации](docs/commands.md).
 
 ## Документация
 
 | Раздел | О чём |
-|--------|-------|
-| [Обзор проекта](docs/overview.md) | Для чего бот, статус разработки, планы |
-| [Установка и запуск](docs/setup.md) | Пошаговый запуск с нуля |
-| [Настройка](docs/configuration.md) | Все переменные config.py и .env |
-| [Команды и кнопки](docs/commands.md) | Что и кто может нажимать |
-| [AFK-система](docs/afk.md) | Как работает AFK-учёт |
-| [Архитектура](docs/architecture.md) | Устройство кода и база данных |
-| [Деплой](docs/deployment.md) | Docker, бэкапы, обновления |
-| [Приватность и данные](docs/privacy.md) | Что хранится, кто имеет доступ, как удалить данные |
-| [Тесты и линтер](docs/testing.md) | Как гонять проверки перед PR |
-| [Как помочь проекту](docs/contributing.md) | С чего начать новичку в проекте |
-| [Дорожная карта](docs/roadmap.md) | Что будем делать дальше |
+|---|---|
+| [Обзор](docs/overview.md) | Назначение, возможности и технологии |
+| [Установка и запуск](docs/setup.md) | Настройка приложения Discord и первый запуск |
+| [Конфигурация](docs/configuration.md) | Переменные окружения, роли, каналы и тексты |
+| [Команды и кнопки](docs/commands.md) | Сценарии для участников и модераторов |
+| [AFK-система](docs/afk.md) | Статусы, автоответы и статистика |
+| [Архитектура](docs/architecture.md) | Модули, потоки данных и схема БД |
+| [Деплой](docs/deployment.md) | Docker, логи, бэкапы и обновления |
+| [Приватность](docs/privacy.md) | Хранимые данные и анонимизация |
+| [Разработка](docs/contributing.md) | Тесты, стиль кода и Pull Request |
+| [Дорожная карта](docs/roadmap.md) | Приоритеты развития |
 
-## Как помочь
+## Участие
 
-Проект в начале пути, любая помощь в цене: от отчёта о баге до готового Pull Request. Список задач - в [Issues](https://github.com/yyangdev/majestick-famq-discord-bot/issues), там есть простые для старта. Подробности в [docs/contributing.md](docs/contributing.md) и [CONTRIBUTING.md](CONTRIBUTING.md).
-
-## Контакты
-
-- Discord: **yangblya**
-- Telegram: **[@yyangov](https://t.me/yyangov)**
+Нашли ошибку, хотите предложить функцию или улучшить документацию? Откройте [Issue](https://github.com/famqcore/Discordbot/issues) или создайте Pull Request. Перед PR прочитайте [CONTRIBUTING.md](CONTRIBUTING.md) и выполните локальные проверки.
 
 ## Лицензия
 
-MIT. Подробности в [LICENSE](LICENSE).
+Код распространяется по лицензии [MIT](LICENSE).

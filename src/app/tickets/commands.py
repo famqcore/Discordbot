@@ -83,13 +83,13 @@ class TicketsCog(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
 
-    @commands.command(name=config.CMD_REGENT)
+    @commands.command(name=config.CMD_FAMQCORE)
     @commands.guild_only()
-    @commands.cooldown(1, config.REGENT_COMMAND_COOLDOWN_SECONDS, commands.BucketType.channel)
-    async def regent_apply(self, ctx):
+    @commands.cooldown(1, config.FAMQCORE_COMMAND_COOLDOWN_SECONDS, commands.BucketType.channel)
+    async def famqcore_apply(self, ctx):
         embed = discord.Embed(
-            title=config.REGENT_EMBED_TITLE,
-            description=config.REGENT_EMBED_DESCRIPTION,
+            title=config.FAMQCORE_EMBED_TITLE,
+            description=config.FAMQCORE_EMBED_DESCRIPTION,
             color=discord.Color.blue(),
         )
         await ctx.send(embed=embed, view=TicketTypeView())

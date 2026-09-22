@@ -1,7 +1,7 @@
 services:
   bot:
     build: .
-    container_name: regent-bot
+    container_name: famqcore-bot
     restart: unless-stopped
     env_file:
       - src/app/.env
