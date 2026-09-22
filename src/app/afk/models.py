@@ -1,22 +1,29 @@
-from datetime import datetime
+"""Бизнес-логика AFK: сессии, ники, статистика.
+
+Правила работы с ником (issue #8):
+
+- ``original_nick`` фиксируется один раз, при старте сессии, и переживает
+  любое число обновлений причины/времени;
+- восстановление возвращает ровно исходное значение, включая ``None``
+  для участника, у которого server nickname не было;
+- префикс распознаётся только в начале строки (``startswith``), поэтому
+  собственный текст «[AFK]» в середине имени не считается служебным;
+- бот трогает ник только если сам его и ставил (``nick_applied``): ник,
+  изменённый участником во время AFK, остаётся за участником.
+"""
+
+from __future__ import annotations
 
 import discord
 
 import config
-from database.afk_db import (
-    check_cooldown as db_check_cooldown,
-    get_afk_user as db_get_afk_user,
-    get_all_afk as db_get_all_afk,
-    get_user_stats as db_get_user_stats,
-    remove_afk as db_remove_afk,
-    set_afk as db_set_afk,
-    set_cooldown as db_set_cooldown,
-    update_stats_on_remove,
-    update_stats_on_set,
-)
+from database import afk_db
+from utils import clock
+from utils.errors import log_event
+from utils.logger import logger
 
 
-def format_duration(seconds):
+def format_duration(seconds) -> str:
     minutes, sec = divmod(max(int(seconds), 0), 60)
     hours, minutes = divmod(minutes, 60)
     days, hours = divmod(hours, 24)
@@ -32,75 +39,171 @@ def format_duration(seconds):
     return " ".join(parts)
 
 
-def set_afk(user_id, guild_id, reason, estimated_return=None, original_nick=None):
-    now = datetime.now().isoformat()
-    was_afk = db_get_afk_user(user_id, guild_id) is not None
-    db_set_afk(user_id, guild_id, reason, now, estimated_return, original_nick)
-    # обновление причины у уже стоящего AFK — не новый уход, статистику не плюсуем
-    if not was_afk:
-        update_stats_on_set(user_id, guild_id)
+def set_afk(
+    user_id: int,
+    guild_id: int,
+    reason: str,
+    estimated_return: str | None = None,
+    original_nick: str | None = None,
+    nick_applied: bool = False,
+) -> dict[str, bool]:
+    """Ставит AFK или обновляет параметры уже идущей сессии.
+
+    Возвращает ``{"created": ..., "updated": ...}``. Счётчик уходов
+    увеличивается только у новой сессии; старт и исходный ник активной
+    сессии не перезаписываются.
+    """
+    return afk_db.set_afk(
+        user_id,
+        guild_id,
+        reason,
+        afk_since=clock.to_db(),
+        estimated_return=estimated_return,
+        original_nick=original_nick,
+        nick_applied=nick_applied,
+    )
 
 
-def remove_afk(user_id, guild_id):
-    row = db_get_afk_user(user_id, guild_id)
-    if not row:
+def remove_afk(user_id: int, guild_id: int) -> int | None:
+    """Снимает AFK. Возвращает длительность сессии или None.
+
+    None означает, что записи уже не было: конкурирующее снятие (кнопка,
+    команда модератора, expiry loop) победило и статистику обновило оно.
+    """
+    snapshot = afk_db.take_afk(user_id, guild_id)
+    if snapshot is None:
         return None
-    afk_since = datetime.fromisoformat(row["afk_since"])
-    duration = int((datetime.now() - afk_since).total_seconds())
-    db_remove_afk(user_id, guild_id)
-    update_stats_on_remove(user_id, duration, guild_id)
-    return duration
+    return snapshot["duration_seconds"]
 
 
-def get_afk_user(user_id, guild_id):
-    row = db_get_afk_user(user_id, guild_id)
+def take_afk_session(user_id: int, guild_id: int) -> dict | None:
+    """Снимает AFK и возвращает полный снимок сессии победившей операции."""
+    return afk_db.take_afk(user_id, guild_id)
+
+
+def get_afk_user(user_id: int, guild_id: int) -> dict | None:
+    row = afk_db.get_afk_user(user_id, guild_id)
     return dict(row) if row else None
 
 
-def get_all_afk(guild_id):
-    return [dict(row) for row in db_get_all_afk(guild_id)]
+def get_all_afk(guild_id: int) -> list[dict]:
+    return [dict(row) for row in afk_db.get_all_afk(guild_id)]
 
 
-def check_and_reply(mentioner_id, afk_user_id, guild_id=0):
-    if db_check_cooldown(
+def get_afk_users(guild_id: int, user_ids) -> dict[int, dict]:
+    """AFK-записи набора участников одним запросом: {user_id: row}."""
+    return {row["user_id"]: dict(row) for row in afk_db.get_afk_users(guild_id, user_ids)}
+
+
+def check_and_reply(mentioner_id: int, afk_user_id: int, guild_id: int = 0) -> bool:
+    """Резервирует право на автоответ (атомарно). False — окно не истекло."""
+    return afk_db.reserve_cooldown(
         mentioner_id,
         afk_user_id,
         config.AFK_COOLDOWN_SECONDS,
         guild_id=guild_id,
-    ):
-        db_set_cooldown(mentioner_id, afk_user_id, guild_id)
-        return True
-    return False
+    )
 
 
-def get_user_stats(user_id, guild_id=None):
-    row = db_get_user_stats(user_id, guild_id)
+def cancel_reply(mentioner_id: int, afk_user_id: int, guild_id: int = 0) -> None:
+    """Возвращает резерв: отправка автоответа не состоялась."""
+    afk_db.release_cooldown(mentioner_id, afk_user_id, guild_id=guild_id)
+
+
+def get_user_stats(user_id: int, guild_id: int | None = None) -> dict | None:
+    row = afk_db.get_user_stats(user_id, guild_id)
     return dict(row) if row else None
 
 
-async def add_afk_nickname(member):
-    if member.nick and config.AFK_NICK_PREFIX in member.nick:
-        return True
-    new_nick = f"{config.AFK_NICK_PREFIX}{member.display_name}"[:32]
-    try:
-        await member.edit(nick=new_nick)
-        return True
-    except discord.Forbidden:
-        return False
+def session_duration(row) -> int:
+    """Длительность текущей сессии по записи AFK."""
+    if not row:
+        return 0
+    value = row["afk_since"] if not isinstance(row, dict) else row.get("afk_since")
+    return clock.seconds_between(clock.parse_db(value))
 
 
-async def remove_afk_nickname(member, original_nick=None):
-    if not member.nick or config.AFK_NICK_PREFIX not in member.nick:
+# ---------------------------------------------------------------------------
+# Ники
+# ---------------------------------------------------------------------------
+
+
+def has_afk_prefix(nick: str | None) -> bool:
+    """Префикс считается служебным только в начале строки."""
+    return bool(nick) and nick.startswith(config.AFK_NICK_PREFIX)
+
+
+def build_afk_nickname(member) -> str:
+    base = member.display_name or ""
+    limit = config.DISCORD_NICK_MAX_LENGTH - len(config.AFK_NICK_PREFIX)
+    return f"{config.AFK_NICK_PREFIX}{base[:limit]}"
+
+
+async def add_afk_nickname(member) -> bool:
+    """Ставит префикс. True — ник принадлежит боту (или уже был с префиксом)."""
+    if has_afk_prefix(member.nick):
         return True
-    if original_nick:
-        new_nick = original_nick[:32]
-    else:
-        new_nick = member.nick.replace(config.AFK_NICK_PREFIX, "", 1).strip()[:32]
-        # если до AFK своего ника не было — возвращаем None, а не копию имени
-        if not new_nick or new_nick == member.display_name:
-            new_nick = None
     try:
-        await member.edit(nick=new_nick)
-        return True
+        await member.edit(nick=build_afk_nickname(member))
     except discord.Forbidden:
+        log_event(
+            "afk.nickname_set",
+            outcome="forbidden",
+            level=30,
+            guild_id=getattr(getattr(member, "guild", None), "id", None),
+            user_id=getattr(member, "id", None),
+        )
         return False
+    except discord.HTTPException as error:
+        logger.warning(
+            f"afk.nickname_set outcome=error error_type={type(error).__name__} "
+            f"user_id={getattr(member, 'id', None)}"
+        )
+        return False
+    return True
+
+
+async def remove_afk_nickname(member, original_nick=None, nick_applied: bool = True) -> bool:
+    """Возвращает исходный ник участника.
+
+    ``original_nick=None`` означает, что до AFK server nickname не было —
+    восстанавливается именно ``None``, а не копия имени аккаунта. Если
+    префикса нет (участник переименовался сам) либо ник ставил не бот,
+    чужое имя не трогается.
+    """
+    current = member.nick
+    if not has_afk_prefix(current):
+        return True
+    if not nick_applied:
+        # префикс поставил не бот: политика — не перетирать чужое решение
+        log_event(
+            "afk.nickname_restore",
+            outcome="skipped_not_owned",
+            guild_id=getattr(getattr(member, "guild", None), "id", None),
+            user_id=getattr(member, "id", None),
+        )
+        return True
+
+    target = original_nick[: config.DISCORD_NICK_MAX_LENGTH] if original_nick else None
+    try:
+        await member.edit(nick=target)
+    except discord.Forbidden:
+        log_event(
+            "afk.nickname_restore",
+            outcome="forbidden",
+            level=30,
+            guild_id=getattr(getattr(member, "guild", None), "id", None),
+            user_id=getattr(member, "id", None),
+        )
+        return False
+    except discord.HTTPException as error:
+        logger.warning(
+            f"afk.nickname_restore outcome=error error_type={type(error).__name__} "
+            f"user_id={getattr(member, 'id', None)}"
+        )
+        return False
+    return True
+
+
+def mark_nick_applied(user_id: int, guild_id: int, applied: bool = True) -> None:
+    afk_db.mark_nick_applied(user_id, guild_id, applied)

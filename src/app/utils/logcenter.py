@@ -12,10 +12,19 @@
   созданных объектов в bot_state. Управляемый канал принадлежит боту,
   поэтому дрейф прав чинится принудительно и заметно.
 
+Устойчивость к архивации (issue #22): ветка ищется не только среди
+активных (``channel.threads``), но и среди архивированных — через
+``archived_threads()`` и ``fetch_channel``. Найденная архивированная
+ветка разархивируется, поэтому история одной категории не распадается
+на дубли после автоархивации.
+
 Гарантия устойчивости: send_to_log никогда не бросает исключений наружу
 (логирование не должно ронять основную логику бота), но вернёт None,
-если отправка отклонена проверками.
+если отправка отклонена проверками. Каждая потеря аудита увеличивает
+счётчик ``delivery_stats()`` — длительная деградация видна оператору.
 """
+
+from __future__ import annotations
 
 import discord
 
@@ -34,6 +43,47 @@ LOG_KEY_ERRORS = config.LOG_KEY_ERRORS
 LOG_KEY_AUDIT = config.LOG_KEY_AUDIT
 
 MAX_AUTO_ARCHIVE = 10080  # неделя — максимум у Discord
+ARCHIVED_SCAN_LIMIT = 100
+
+# Счётчики доставки логов: видимость деградации аудита без раскрытия данных.
+_DELIVERY = {"sent": 0, "rejected": 0, "failed": 0}
+# Порог подряд идущих неудач, после которого пишем CRITICAL
+DEGRADED_ALERT_THRESHOLD = 5
+_consecutive_failures = 0
+
+
+def delivery_stats() -> dict[str, int]:
+    """Счётчики отправок лог-центра (sent / rejected / failed)."""
+    return dict(_DELIVERY)
+
+
+def reset_delivery_stats() -> None:
+    global _consecutive_failures
+    for key in _DELIVERY:
+        _DELIVERY[key] = 0
+    _consecutive_failures = 0
+
+
+def _record_delivery(outcome: str, key: str, detail: str = "") -> None:
+    """Фиксирует исход отправки и поднимает тревогу при длительной деградации."""
+    global _consecutive_failures
+    _DELIVERY[outcome] = _DELIVERY.get(outcome, 0) + 1
+    if outcome == "sent":
+        _consecutive_failures = 0
+        return
+    _consecutive_failures += 1
+    message = (
+        f"logcenter outcome={outcome} key={key} " f"consecutive_failures={_consecutive_failures}"
+    )
+    if detail:
+        message = f"{message} detail={detail}"
+    if _consecutive_failures >= DEGRADED_ALERT_THRESHOLD:
+        logger.critical(
+            f"{message} — аудит не пишется подряд "
+            f"{_consecutive_failures} раз, проверьте конфигурацию лог-центра"
+        )
+    else:
+        logger.error(message)
 
 
 def _private_overwrites(guild):
@@ -93,19 +143,37 @@ def audit_channel_privacy(guild, channel) -> list[str]:
 
 
 async def _audit_thread(guild, channel, thread) -> list[str]:
-    """Проверка ветки лог-центра: тип, сервер, родитель, разархивирование."""
+    """Проверка ветки лог-центра: тип, сервер, родитель, разархивирование.
+
+    Тип проверяется строго: произвольный «что-нибудь с методом send»
+    destination не принимается — только ``discord.Thread`` в настроенном
+    лог-канале этого сервера (issue #22).
+    """
     if not isinstance(thread, discord.Thread):
-        return [f"объект {getattr(thread, 'id', thread)} не является веткой"]
+        return [
+            f"объект {getattr(thread, 'id', thread)} не является веткой "
+            f"(тип {type(thread).__name__})"
+        ]
     if getattr(getattr(thread, "guild", None), "id", None) != getattr(guild, "id", None):
         return [f"ветка {thread.id} принадлежит другому серверу"]
     if getattr(thread, "parent_id", None) != getattr(channel, "id", None):
         return [f"ветка {thread.id} находится не в настроенном лог-канале"]
+    if getattr(thread, "locked", False):
+        return [f"ветка {thread.id} заблокирована (locked), писать в неё нельзя"]
     if getattr(thread, "archived", False):
         try:
             await thread.edit(archived=False)
-            logger.info(f"logcenter: ветка «{getattr(thread, 'name', thread.id)}» разархивирована")
-        except Exception as e:
-            return [f"ветка {thread.id} архивирована, разархивировать не удалось: {e}"]
+            logger.info(
+                f"logcenter outcome=unarchived thread_id={thread.id} "
+                f"name={getattr(thread, 'name', '?')}"
+            )
+        except discord.Forbidden:
+            return [f"ветка {thread.id} архивирована, у бота нет прав её разархивировать"]
+        except discord.HTTPException as error:
+            return [
+                f"ветка {thread.id} архивирована, разархивировать не удалось "
+                f"({type(error).__name__})"
+            ]
     return []
 
 
@@ -116,8 +184,39 @@ async def _fetch_guild_channel(guild, channel_id):
         return channel
     try:
         return await guild.fetch_channel(channel_id)
-    except Exception:
+    except (discord.NotFound, discord.Forbidden):
         return None
+    except discord.HTTPException as error:
+        logger.warning(
+            f"logcenter outcome=fetch_failed channel_id={channel_id} "
+            f"error_type={type(error).__name__}"
+        )
+        return None
+
+
+async def _find_thread_by_name(channel, name: str):
+    """Ищет ветку по имени среди активных И архивированных (issue #22).
+
+    Без просмотра архива бот после автоархивации создал бы вторую ветку
+    с тем же именем, и история категории разошлась бы на две.
+    """
+    for thread in getattr(channel, "threads", []) or []:
+        if getattr(thread, "name", None) == name:
+            return thread
+
+    archived = getattr(channel, "archived_threads", None)
+    if archived is None:
+        return None
+    try:
+        async for thread in archived(limit=ARCHIVED_SCAN_LIMIT):
+            if getattr(thread, "name", None) == name:
+                return thread
+    except (discord.Forbidden, discord.HTTPException) as error:
+        logger.warning(
+            f"logcenter outcome=archive_scan_failed channel_id={getattr(channel, 'id', None)} "
+            f"error_type={type(error).__name__}"
+        )
+    return None
 
 
 async def _repair_managed_channel(guild, channel) -> bool:
@@ -213,6 +312,24 @@ async def _resolve_thread(guild, key: str):
             )
         state_db.delete_state(state_key)
 
+    # ID не сохранён (первый запуск после обновления или потеря bot_state):
+    # ищем существующую ветку по имени, включая архивированные, чтобы не
+    # расколоть историю категории на дубли
+    existing = await _find_thread_by_name(channel, name)
+    if existing is not None:
+        problems = await _audit_thread(guild, channel, existing)
+        if not problems:
+            state_db.set_state(state_key, str(existing.id))
+            logger.info(
+                f"logcenter outcome=reused_thread key={key} thread_id={existing.id} "
+                "(ветка найдена по имени, в том числе в архиве)"
+            )
+            return existing
+        logger.warning(
+            f"logcenter: найденная по имени ветка «{name}» непригодна "
+            f"({'; '.join(problems)}), создаю новую"
+        )
+
     thread = await channel.create_thread(
         name=name,
         type=discord.ChannelType.public_thread,
@@ -271,24 +388,41 @@ async def send_to_log(
 
     try:
         destination = await _resolve_thread(guild, key)
-    except Exception as e:
-        logger.error(f"logcenter: не удалось подготовить ветку «{key}»: {e}")
+    except (discord.Forbidden, discord.HTTPException) as error:
+        _record_delivery("failed", key, f"resolve_{type(error).__name__}")
+        return None
+    except Exception as error:  # noqa: BLE001 - логирование не должно ронять бота
+        logger.exception(f"logcenter outcome=resolve_error key={key}")
+        _record_delivery("failed", key, type(error).__name__)
         return None
 
     if destination is None:
-        logger.error(
-            f"logcenter: отправка «{key}» отклонена — лог-центр не прошёл проверку "
-            "(fail closed: чувствительные данные не покидают проверенный контур)"
+        _record_delivery(
+            "rejected",
+            key,
+            "fail_closed: лог-центр не прошёл проверку приватности/конфигурации",
         )
         return None
 
     try:
-        return await destination.send(
+        message = await destination.send(
             content=content, embed=embed, files=files, allowed_mentions=mentions_for()
         )
-    except Exception as e:
-        logger.error(f"logcenter: не удалось отправить лог «{key}»: {e}")
+    except discord.Forbidden:
+        _record_delivery("failed", key, "нет прав на отправку в ветку лог-центра")
         return None
+    except discord.HTTPException as error:
+        _record_delivery("failed", key, f"http_{getattr(error, 'status', '?')}")
+        return None
+    except Exception as error:  # noqa: BLE001 - логирование не должно ронять бота
+        logger.exception(f"logcenter outcome=send_error key={key}")
+        _record_delivery("failed", key, type(error).__name__)
+        return None
+
+    _DELIVERY["sent"] += 1
+    global _consecutive_failures
+    _consecutive_failures = 0
+    return message
 
 
 async def delete_log_messages(guild, refs) -> int:
@@ -299,14 +433,34 @@ async def delete_log_messages(guild, refs) -> int:
     """
     deleted = 0
     for thread_id, message_id in refs:
-        try:
-            thread = await _fetch_guild_channel(guild, thread_id)
-            if thread is None:
-                logger.warning(f"logcenter: ветка {thread_id} недоступна, сообщение не удалено")
+        thread = await _fetch_guild_channel(guild, thread_id)
+        if thread is None:
+            logger.warning(
+                f"logcenter outcome=delete_skipped thread_id={thread_id} "
+                f"message_id={message_id} reason=thread_unavailable"
+            )
+            continue
+        if isinstance(thread, discord.Thread) and getattr(thread, "archived", False):
+            # архивированную ветку сначала открываем, иначе удаление не пройдёт
+            try:
+                await thread.edit(archived=False)
+            except (discord.Forbidden, discord.HTTPException) as error:
+                logger.warning(
+                    f"logcenter outcome=delete_skipped thread_id={thread_id} "
+                    f"message_id={message_id} reason=unarchive_failed "
+                    f"error_type={type(error).__name__}"
+                )
                 continue
+        try:
             message = await thread.fetch_message(message_id)
             await message.delete()
             deleted += 1
-        except Exception as e:
-            logger.warning(f"logcenter: не удалось удалить сообщение {message_id}: {e}")
+        except discord.NotFound:
+            # сообщение уже удалено — цель достигнута
+            deleted += 1
+        except (discord.Forbidden, discord.HTTPException) as error:
+            logger.warning(
+                f"logcenter outcome=delete_failed thread_id={thread_id} "
+                f"message_id={message_id} error_type={type(error).__name__}"
+            )
     return deleted

@@ -1,13 +1,19 @@
+"""Точка входа: интенты, lifecycle бота и единый обработчик ошибок команд."""
+
+from __future__ import annotations
+
 import asyncio
+import sqlite3
 
 import discord
 from discord.ext import commands
 
 import config
 from afk.views import AfkMenuView
-from database import init_afk_db, init_db
+from database import SchemaError, init_afk_db, init_db, schema_version, shutdown_db
 from tickets.commands import TicketTypeView
 from tickets.views import FullTicketView
+from utils.errors import format_context, new_correlation_id
 from utils.logcenter import LOG_KEY_ERRORS, send_to_log
 from utils.logger import logger
 from utils.mentions import DEFAULT_ALLOWED_MENTIONS
@@ -17,6 +23,8 @@ intents = discord.Intents.default()
 intents.message_content = True
 intents.members = True
 
+EXTENSIONS = ("tickets", "afk")
+
 
 class FamqCoreBot(commands.Bot):
     # инфраструктурная проверка выполняется один раз после первого READY;
@@ -24,19 +32,35 @@ class FamqCoreBot(commands.Bot):
     startup_checked = False
     startup_failed = False
 
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._startup_task: asyncio.Task | None = None
+
     async def setup_hook(self):
         # setup_hook вызывается один раз при старте; on_ready — при каждом
         # переподключении, поэтому загрузка расширений живёт только здесь
         init_db()
         init_afk_db()
-        await self.load_extension("tickets")
-        await self.load_extension("afk")
+        logger.info(f"bot.startup outcome=schema_ready version=v{schema_version()}")
+
+        for extension in EXTENSIONS:
+            await self.load_extension(extension)
 
         # persistent views: кнопки заявок и AFK продолжают работать
         # после перезапуска бота (custom_id прописаны у всех кнопок)
         self.add_view(TicketTypeView())
         self.add_view(FullTicketView())
         self.add_view(AfkMenuView())
+
+    async def close(self):
+        """Корректное завершение: задачи Cog отменяются, БД закрывается."""
+        if self._startup_task is not None and not self._startup_task.done():
+            self._startup_task.cancel()
+        try:
+            await super().close()
+        finally:
+            shutdown_db()
+            logger.info("bot.shutdown outcome=ok")
 
 
 bot = FamqCoreBot(
@@ -50,12 +74,12 @@ bot = FamqCoreBot(
 
 @bot.event
 async def on_ready():
-    logger.info(f"Бот {bot.user} запущен")
+    logger.info(f"bot.ready outcome=ok user={bot.user} guilds={len(bot.guilds)}")
     if not bot.startup_checked:
         bot.startup_checked = True
         # проверка заданных ID до обработки первой заявки (fail fast);
         # не блокирует on_ready, чтобы не терять heartbeat
-        asyncio.create_task(check_startup(bot))
+        bot._startup_task = asyncio.create_task(check_startup(bot))
 
 
 @bot.event
@@ -83,25 +107,40 @@ async def on_command_error(ctx: commands.Context, error: commands.CommandError):
         await ctx.send("⛔ Недостаточно прав для этой команды.")
         return
 
-    logger.error(f"Ошибка команды {ctx.command}: {error}")
+    # неожиданная ошибка: traceback и correlation id обязательны,
+    # пользователь получает безопасный текст ровно один раз
+    correlation_id = new_correlation_id()
+    original = getattr(error, "original", error)
+    context = format_context(
+        command=getattr(ctx.command, "name", None),
+        guild_id=getattr(ctx.guild, "id", None),
+        channel_id=getattr(ctx.channel, "id", None),
+        user_id=getattr(ctx.author, "id", None),
+        correlation_id=correlation_id,
+    )
+    logger.exception(
+        f"command.error outcome=error error_type={type(original).__name__} {context}",
+        exc_info=original,
+    )
+
+    await ctx.send(f"⚠️ Команда завершилась ошибкой. Код для администратора: `{correlation_id}`")
+
     if ctx.guild is not None:
         embed = discord.Embed(title="🚨 Ошибка команды", color=discord.Color.red())
         embed.add_field(name="Команда", value=f"{ctx.command}", inline=True)
-        embed.add_field(name="Автор", value=ctx.author.mention, inline=True)
-        embed.add_field(name="Ошибка", value=str(error)[:500], inline=False)
+        embed.add_field(name="Код", value=f"`{correlation_id}`", inline=True)
+        embed.add_field(name="Тип", value=type(original).__name__, inline=True)
         await send_to_log(ctx.guild, LOG_KEY_ERRORS, embed=embed)
 
 
-if __name__ == "__main__":
-    config_errors = config.validate()
+def main() -> int:
+    """Валидация конфигурации, запуск бота и корректный код выхода."""
+    config_errors = config.validate(require_token=True)
     if config_errors:
+        logger.critical("Конфигурация не прошла проверку, бот не запущен:")
         for err in config_errors:
-            logger.critical(f"Конфиг: {err}")
-        raise SystemExit(1)
-
-    if not config.TOKEN:
-        logger.critical("TOKEN не задан. Заполните .env по образцу .env.example")
-        raise SystemExit(1)
+            logger.critical(f"  • {err}")
+        return 1
 
     if config.ALLOW_NAME_FALLBACK:
         logger.warning(
@@ -110,8 +149,23 @@ if __name__ == "__main__":
             "Никогда не используйте в production."
         )
 
-    bot.run(config.TOKEN)
+    try:
+        bot.run(config.TOKEN, log_handler=None)
+    except discord.LoginFailure:
+        logger.critical("Discord отклонил TOKEN. Проверьте значение в .env")
+        return 1
+    except SchemaError as error:
+        logger.critical(f"Схема базы данных: {error}")
+        return 1
+    except sqlite3.Error as error:
+        logger.critical(f"База данных недоступна: {type(error).__name__}")
+        return 1
+    finally:
+        shutdown_db()
 
     # check_startup остановил бота из-за ошибочной конфигурации
-    if bot.startup_failed:
-        raise SystemExit(1)
+    return 1 if bot.startup_failed else 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

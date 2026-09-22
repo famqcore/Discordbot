@@ -1,3 +1,22 @@
+"""Конфигурация бота: загрузка, разбор и валидация .env.
+
+Три раздельных шага (issue #12):
+
+1. **Загрузка.** ``load_dotenv()`` и чтение переменных окружения как строк.
+2. **Разбор.** Функции ``_int_env``/``_int_list_env``/``_seconds_env`` строго
+   различают «значение не задано» (берётся документированное значение по
+   умолчанию) и «значение задано, но неверно» (ошибка в отчёт, без тихого
+   приведения к None). Разбор никогда не бросает исключение на импорте —
+   иначе оператор получает traceback вместо списка исправлений.
+3. **Валидация.** ``validate()`` собирает все проблемы в один отчёт:
+   диапазоны интервалов, положительность и уникальность ID, соответствие
+   списка голосовых каналов подписям, лимиты Discord, запрет небезопасных
+   production-fallback.
+
+Секрет TOKEN никогда не попадает в текст ошибки или лога: сообщения
+оперируют только именем переменной.
+"""
+
 import os
 
 from dotenv import load_dotenv
@@ -7,48 +26,129 @@ load_dotenv()
 # Ошибки разбора .env, собранные при импорте. validate() докладывает их до старта.
 _ENV_ERRORS: list[str] = []
 
+# Discord snowflake: 64-битный ID, на практике 17-20 цифр.
+MIN_DISCORD_ID = 10**16
+MAX_DISCORD_ID = 2**63 - 1
 
-def _int_env(name: str):
-    """ID из .env как int; None, если переменная не задана.
 
-    Нечисловое значение — ошибка конфигурации: в .env нельзя написать
-    «какой-нибудь id» и получить молчаливую подмену поведения.
-    """
+def _raw_env(name: str) -> str | None:
+    """Значение переменной окружения без пробелов; None, если не задано."""
     value = os.getenv(name)
-    if not value or not value.strip():
+    if value is None:
         return None
     value = value.strip()
-    if value.isdigit():
-        return int(value)
-    _ENV_ERRORS.append(f"{name}: значение «{value}» не похоже на Discord ID (нужны только цифры)")
-    return None
+    return value or None
+
+
+def _error(message: str) -> None:
+    if message not in _ENV_ERRORS:
+        _ENV_ERRORS.append(message)
+
+
+def _int_env(name: str) -> int | None:
+    """Discord ID из .env; None, если переменная не задана.
+
+    Нечисловое значение или значение вне диапазона snowflake — ошибка
+    конфигурации: в .env нельзя написать «какой-нибудь id» и получить
+    молчаливую подмену поведения.
+    """
+    value = _raw_env(name)
+    if value is None:
+        return None
+    if not value.isdigit():
+        _error(f"{name}: значение «{value}» не похоже на Discord ID (нужны только цифры)")
+        return None
+    number = int(value)
+    if number < MIN_DISCORD_ID or number > MAX_DISCORD_ID:
+        _error(
+            f"{name}: значение {number} вне диапазона Discord ID "
+            f"({MIN_DISCORD_ID}–{MAX_DISCORD_ID})"
+        )
+        return None
+    return number
 
 
 def _bool_env(name: str, default: bool = False) -> bool:
-    value = os.getenv(name)
-    if value is None or not value.strip():
+    value = _raw_env(name)
+    if value is None:
         return default
-    return value.strip().lower() in ("1", "true", "yes", "on")
+    lowered = value.lower()
+    if lowered in ("1", "true", "yes", "on"):
+        return True
+    if lowered in ("0", "false", "no", "off"):
+        return False
+    _error(f"{name}: значение «{value}» не булево (ожидается true/false)")
+    return default
 
 
-def _int_list_env(name: str) -> list:
-    """Список ID из .env через запятую (пустой список, если не задано).
+def _int_list_env(name: str) -> list[int]:
+    """Список Discord ID через запятую (пустой список, если не задано).
 
     Нечисловые элементы — ошибка конфигурации, а не повод их пропустить:
-    оператор думает, что ID настроен, а бот его не видит.
+    оператор думает, что ID настроен, а бот его не видит. Дубликаты тоже
+    ошибка: одна и та же кнопка обзвона не может вести в два канала.
     """
     value = os.getenv(name, "")
-    ids = []
-    for part in (x.strip() for x in value.split(",")):
+    ids: list[int] = []
+    for part in (item.strip() for item in value.split(",")):
         if not part:
             continue
-        if part.isdigit():
-            ids.append(int(part))
-        else:
-            _ENV_ERRORS.append(
-                f"{name}: элемент «{part}» не похож на Discord ID (нужны только цифры)"
-            )
+        if not part.isdigit():
+            _error(f"{name}: элемент «{part}» не похож на Discord ID (нужны только цифры)")
+            continue
+        number = int(part)
+        if number < MIN_DISCORD_ID or number > MAX_DISCORD_ID:
+            _error(f"{name}: элемент {number} вне диапазона Discord ID")
+            continue
+        if number in ids:
+            _error(f"{name}: ID {number} указан несколько раз")
+            continue
+        ids.append(number)
     return ids
+
+
+def _seconds_env(name: str, default: int, minimum: int, maximum: int) -> int:
+    """Интервал в секундах с проверкой диапазона; при ошибке — default."""
+    value = _raw_env(name)
+    if value is None:
+        return default
+    try:
+        number = int(value)
+    except ValueError:
+        _error(f"{name}: значение «{value}» не целое число секунд")
+        return default
+    if number < minimum or number > maximum:
+        _error(f"{name}: {number} вне допустимого диапазона {minimum}–{maximum} сек")
+        return default
+    return number
+
+
+def _days_env(name: str, default: int, minimum: int, maximum: int) -> int:
+    value = _raw_env(name)
+    if value is None:
+        return default
+    try:
+        number = int(value)
+    except ValueError:
+        _error(f"{name}: значение «{value}» не целое число дней")
+        return default
+    if number < minimum or number > maximum:
+        _error(f"{name}: {number} вне допустимого диапазона {minimum}–{maximum} дн")
+        return default
+    return number
+
+
+def _timezone_env(name: str, default: str) -> str:
+    """Имя часового пояса IANA (например Europe/Moscow)."""
+    from utils.clock import is_valid_timezone
+
+    value = _raw_env(name)
+    if value is None:
+        return default
+    if not is_valid_timezone(value):
+        _error(f"{name}: «{value}» не является именем часового пояса IANA (пример: Europe/Moscow)")
+        return default
+    return value
 
 
 TOKEN = os.getenv("TOKEN")
@@ -67,6 +167,10 @@ LOG_DIR = os.path.join(os.path.dirname(__file__), "logs")
 # ---------------------------------------------------------------------------
 
 ALLOW_NAME_FALLBACK = _bool_env("ALLOW_NAME_FALLBACK", False)
+
+# production (по умолчанию) запрещает небезопасные dev-режимы; development
+# разрешает их явным выбором оператора.
+ENVIRONMENT = (_raw_env("ENVIRONMENT") or "production").lower()
 
 # Категория для создания тикетов
 TICKETS_CATEGORY_NAME = "FAMQCORE • заявки"
@@ -275,9 +379,21 @@ AFK_VOICE_RETURN_DESC = "🟢 Пользователь вернулся из AFK
 
 AFK_COOLDOWN_SECONDS = 30
 AFK_NICK_PREFIX = "[AFK] "
+DISCORD_NICK_MAX_LENGTH = 32
+
+# Границы длительности AFK (issue #13). Нулевая длительность запрещена:
+# «остаюсь на месте» — это не AFK, а кнопка «Отменить AFK».
+AFK_MIN_DURATION_MINUTES = 1
+AFK_MAX_DURATION_MINUTES = 30 * 24 * 60  # 30 суток
+
+# Автоответы на упоминания AFK (issue #10)
+AFK_MAX_MENTIONS_PER_MESSAGE = 5  # сколько упоминаний проверяем в одном сообщении
+AFK_REPLY_CHANNEL_LIMIT = 3  # автоответов на канал за окно
+AFK_REPLY_CHANNEL_WINDOW_SECONDS = 20
+AFK_REPLY_DELETE_AFTER_SECONDS = 60
 
 # Авто-снятие AFK по истечении времени (фоновая задача)
-AFK_EXPIRY_CHECK_SECONDS = int(os.getenv("AFK_EXPIRY_CHECK_SECONDS", "60"))
+AFK_EXPIRY_CHECK_SECONDS = _seconds_env("AFK_EXPIRY_CHECK_SECONDS", 60, 10, 86400)
 AFK_EXPIRED_DM = "⏰ Ваш AFK на сервере {guild} истёк — вы снова в строю."
 
 # Логи AFK в лог-центр
@@ -322,9 +438,15 @@ RETENTION_AUDIT_TITLE = "🧾 Ретенция: очистка старых за
 # Срок хранения тикетов и транскриптов (дни), по умолчанию 180.
 # Записи старше срока удаляются фоновой задачей вместе с привязанными
 # сообщениями лог-центра (docs/privacy.md).
-_retention_days = _int_env("TICKET_RETENTION_DAYS")
-TICKET_RETENTION_DAYS = _retention_days if _retention_days is not None else 180
-RETENTION_CHECK_SECONDS = _int_env("RETENTION_CHECK_SECONDS") or 86400
+TICKET_RETENTION_DAYS = _days_env("TICKET_RETENTION_DAYS", 180, 1, 3650)
+RETENTION_CHECK_SECONDS = _seconds_env("RETENTION_CHECK_SECONDS", 86400, 60, 604800)
+
+# Тикет, застрявший в состоянии processing дольше этого срока, считается
+# брошенным: reconciliation вернёт его в работу или закроет (issues #2, #3).
+TICKET_PROCESSING_TIMEOUT_SECONDS = _seconds_env(
+    "TICKET_PROCESSING_TIMEOUT_SECONDS", 300, 30, 86400
+)
+TICKET_RECONCILE_CHECK_SECONDS = _seconds_env("TICKET_RECONCILE_CHECK_SECONDS", 600, 60, 86400)
 
 # Поля эмбеда !afk_check
 AFK_FIELD_STATUS = "Статус"
@@ -333,31 +455,105 @@ AFK_FIELD_LEFT = "Ушёл"
 AFK_FIELD_DURATION = "Время в AFK"
 
 
-def validate() -> list:
-    """Проверяет конфиг перед запуском: лимиты Discord и целостность .env.
+# ---------------------------------------------------------------------------
+# Время
+#
+# Хранение и сравнение — всегда в UTC (utils/clock.py). GUILD_TIMEZONE
+# задаёт пояс сообщества: в нём разбирается пользовательский ввод «23:45»
+# и считается «день» дневной статистики. LEGACY_TIMEZONE — пояс, в котором
+# исторические наивные даты записаны старыми версиями бота; используется
+# один раз, миграцией схемы v4.
+# ---------------------------------------------------------------------------
 
-    Возвращает список найденных ошибок (пустой = всё ок).
-    """
-    errors = list(_ENV_ERRORS)
+GUILD_TIMEZONE = _timezone_env("GUILD_TIMEZONE", "UTC")
+LEGACY_TIMEZONE = _timezone_env("LEGACY_TIMEZONE", "UTC")
 
+# ---------------------------------------------------------------------------
+# Лимиты in-memory rate limiter (issue #15)
+# ---------------------------------------------------------------------------
+
+RATELIMIT_MAX_ENTRIES = 10000  # жёсткий потолок ключей в памяти
+RATELIMIT_CLEANUP_INTERVAL_SECONDS = 60
+
+# Лимиты Discord, на которые опирается валидация
+DISCORD_MODAL_MAX_FIELDS = 5
+DISCORD_LABEL_MAX_LENGTH = 45
+DISCORD_EMBED_DESCRIPTION_MAX = 4096
+DISCORD_EMBED_FIELD_VALUE_MAX = 1024
+DISCORD_CHANNEL_NAME_MAX = 100
+
+
+def _validate_forms(errors: list[str]) -> None:
     for name, fields in (("RP_FIELDS", RP_FIELDS), ("CAPT_FIELDS", CAPT_FIELDS)):
-        if len(fields) > 5:
-            errors.append(f"{name}: полей {len(fields)}, а модалка вмещает максимум 5")
-        for label, *_ in fields:
-            if len(label) > 45:
-                errors.append(f"{name}: label «{label[:30]}…» длиной {len(label)} > 45 символов")
+        if len(fields) > DISCORD_MODAL_MAX_FIELDS:
+            errors.append(
+                f"{name}: полей {len(fields)}, а модалка вмещает максимум "
+                f"{DISCORD_MODAL_MAX_FIELDS}"
+            )
+        if not fields:
+            errors.append(f"{name}: форма без полей не имеет смысла")
+        for label, placeholder, _required, max_length in fields:
+            if len(label) > DISCORD_LABEL_MAX_LENGTH:
+                errors.append(
+                    f"{name}: label «{label[:30]}…» длиной {len(label)} > "
+                    f"{DISCORD_LABEL_MAX_LENGTH} символов"
+                )
+            if not 1 <= max_length <= 4000:
+                errors.append(f"{name}: max_length поля «{label[:30]}» вне диапазона 1–4000")
+            if len(placeholder) > 100:
+                errors.append(f"{name}: placeholder поля «{label[:30]}» длиннее 100 символов")
 
     if not TICKET_RP_TITLE or not TICKET_CAPT_TITLE:
         errors.append("Заголовки форм заявок не должны быть пустыми")
 
-    if AFK_EXPIRY_CHECK_SECONDS < 10:
-        errors.append("AFK_EXPIRY_CHECK_SECONDS слишком мал (< 10 сек)")
+    if len(FAMQCORE_EMBED_DESCRIPTION) > DISCORD_EMBED_DESCRIPTION_MAX:
+        errors.append(
+            f"FAMQCORE_EMBED_DESCRIPTION длиннее лимита Discord "
+            f"({DISCORD_EMBED_DESCRIPTION_MAX} символов)"
+        )
 
-    if TICKET_RETENTION_DAYS < 1:
-        errors.append("TICKET_RETENTION_DAYS должен быть положительным числом дней")
 
-    if RETENTION_CHECK_SECONDS < 60:
-        errors.append("RETENTION_CHECK_SECONDS слишком мал (< 60 сек)")
+def _validate_ids(errors: list[str]) -> None:
+    """Уникальность ID и согласованность списка голосовых каналов."""
+    named_ids = {
+        "TICKETS_CATEGORY_ID": TICKETS_CATEGORY_ID,
+        "ROLE_APPLIED_ID": ROLE_APPLIED_ID,
+        "ROLE_RECRUITER_ID": ROLE_RECRUITER_ID,
+        "ROLE_OWNER_ID": ROLE_OWNER_ID,
+        "ROLE_DEP_OWNER_ID": ROLE_DEP_OWNER_ID,
+        "ROLE_ADMIN_ID": ROLE_ADMIN_ID,
+        "ROLE_SUPPORT_ID": ROLE_SUPPORT_ID,
+        "LOG_CHANNEL_ID": LOG_CHANNEL_ID,
+    }
+    for key, value in LOG_THREAD_IDS.items():
+        named_ids[LOG_THREAD_ENV_NAMES.get(key, key)] = value
+
+    seen: dict[int, str] = {}
+    for name, value in named_ids.items():
+        if value is None:
+            continue
+        previous = seen.get(value)
+        if previous is not None:
+            errors.append(f"{name} и {previous} указывают на один и тот же ID {value}")
+        else:
+            seen[value] = name
+
+    for index, channel_id in enumerate(VOICE_CHANNEL_IDS):
+        previous = seen.get(channel_id)
+        if previous is not None:
+            errors.append(
+                f"VOICE_CHANNEL_IDS[{index}] и {previous} указывают на один и тот же ID "
+                f"{channel_id}"
+            )
+        else:
+            seen[channel_id] = f"VOICE_CHANNEL_IDS[{index}]"
+
+    if VOICE_CHANNEL_IDS and len(VOICE_CHANNEL_IDS) != len(VOICE_CHANNELS):
+        errors.append(
+            f"VOICE_CHANNEL_IDS: задано {len(VOICE_CHANNEL_IDS)} ID, "
+            f"а кнопок обзвона {len(VOICE_CHANNELS)} — "
+            "кнопки без ID не смогут найти канал в production-режиме"
+        )
 
     # ветка логов без своего канала не однозначна: родительская
     # приватность проверяется у канала, поэтому он обязателен
@@ -366,5 +562,50 @@ def validate() -> list:
             "Заданы ID веток лог-центра без LOG_CHANNEL_ID — "
             "задайте и канал, иначе приватность ветки нечем гарантировать"
         )
+
+
+def _validate_intervals(errors: list[str]) -> None:
+    if AFK_MIN_DURATION_MINUTES < 1:
+        errors.append("AFK_MIN_DURATION_MINUTES должен быть положительным")
+    if AFK_MAX_DURATION_MINUTES <= AFK_MIN_DURATION_MINUTES:
+        errors.append("AFK_MAX_DURATION_MINUTES должен быть больше AFK_MIN_DURATION_MINUTES")
+    if AFK_COOLDOWN_SECONDS < 1:
+        errors.append("AFK_COOLDOWN_SECONDS должен быть положительным")
+    if AFK_MAX_MENTIONS_PER_MESSAGE < 1:
+        errors.append("AFK_MAX_MENTIONS_PER_MESSAGE должен быть положительным")
+    if TICKET_PROCESSING_TIMEOUT_SECONDS >= TICKET_RETENTION_DAYS * 86400:
+        errors.append("TICKET_PROCESSING_TIMEOUT_SECONDS не может превышать срок хранения заявок")
+    if RATELIMIT_MAX_ENTRIES < 100:
+        errors.append("RATELIMIT_MAX_ENTRIES слишком мал (< 100)")
+
+
+def _validate_production_safety(errors: list[str]) -> None:
+    """Небезопасные для production режимы и отсутствие обязательных секретов."""
+    if ALLOW_NAME_FALLBACK and ENVIRONMENT == "production":
+        errors.append(
+            "ALLOW_NAME_FALLBACK=true недопустим при ENVIRONMENT=production: "
+            "поиск объектов по имени открывает доступ к тикетам и логам "
+            "одноимённым ролям"
+        )
+    if ENVIRONMENT not in ("production", "development"):
+        errors.append(
+            f"ENVIRONMENT: «{ENVIRONMENT}» — допустимы значения production или development"
+        )
+
+
+def validate(*, require_token: bool = False) -> list[str]:
+    """Полный отчёт о проблемах конфигурации (пустой список = всё ок).
+
+    Собирает все ошибки сразу, чтобы оператор исправил их за один заход,
+    а не перезапускал бота на каждой. Значение TOKEN в отчёт не попадает.
+    """
+    errors = list(_ENV_ERRORS)
+    _validate_forms(errors)
+    _validate_ids(errors)
+    _validate_intervals(errors)
+    _validate_production_safety(errors)
+
+    if require_token and not TOKEN:
+        errors.append("TOKEN не задан. Заполните .env по образцу .env.example")
 
     return errors

@@ -4,6 +4,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import discord
 
+from tests.support import AsyncIterator, http_exception, make_forbidden, make_not_found
 from utils import logcenter
 from utils.logcenter import (
     audit_channel_privacy,
@@ -40,6 +41,9 @@ def make_guild(guild_id=1):
     guild.get_role = MagicMock(return_value=None)
     guild.get_channel = MagicMock(return_value=None)
     guild.get_thread = MagicMock(return_value=None)
+    # объекта нет ни в кэше, ни на сервере: fetch_channel обязан быть
+    # корутиной, иначе тест не поймает «await MagicMock»
+    guild.fetch_channel = AsyncMock(side_effect=make_not_found())
     return guild
 
 
@@ -55,18 +59,21 @@ def make_channel(guild, channel_id=100, *, viewable_by_everyone=False):
     )
     channel.overwrites = {}
     channel.threads = []
+    channel.archived_threads = MagicMock(return_value=AsyncIterator([]))
     channel.create_thread = AsyncMock()
     channel.edit = AsyncMock()
     return channel
 
 
-def make_thread(guild, channel, thread_id=200, *, archived=False):
+def make_thread(guild, channel, thread_id=200, *, archived=False, locked=False, name="ветка"):
     thread = MagicMock(spec=discord.Thread)
     thread.id = thread_id
     thread.guild = guild
+    thread.parent = channel
     thread.parent_id = channel.id
     thread.archived = archived
-    thread.name = "ветка"
+    thread.locked = locked
+    thread.name = name
     thread.send = AsyncMock(return_value=MagicMock(spec=discord.Message))
     thread.edit = AsyncMock()
     thread.fetch_message = AsyncMock()
@@ -327,6 +334,202 @@ class TestManagedLogCenter(unittest.IsolatedAsyncioTestCase):
 
         self.assertIsNotNone(result)
         guild.create_text_channel.assert_awaited_once()
+
+
+class TestArchivedThreadReuse(unittest.IsolatedAsyncioTestCase):
+    """Issue #22: архивированная ветка переиспользуется, а не дублируется."""
+
+    def _managed_state(self, guild, channel_id="100"):
+        state = MagicMock()
+        state.get_state = MagicMock(
+            side_effect=lambda key: channel_id if key == f"log_channel:{guild.id}" else None
+        )
+        return state
+
+    async def test_archived_thread_found_by_name_and_reused(self):
+        guild = make_guild()
+        channel = make_channel(guild)
+        archived = make_thread(guild, channel, thread_id=201, archived=True, name="🔴-afk")
+        channel.archived_threads = MagicMock(return_value=AsyncIterator([archived]))
+        guild.get_channel = MagicMock(side_effect=lambda cid: {100: channel}.get(cid))
+        state = self._managed_state(guild)
+
+        with patch.object(logcenter, "config", make_config()):
+            with patch.object(logcenter, "state_db", state):
+                result = await send_to_log(guild, "afk", content="test")
+
+        self.assertIsNotNone(result)
+        channel.create_thread.assert_not_called()
+        archived.edit.assert_awaited_once_with(archived=False)
+        archived.send.assert_awaited_once()
+        state.set_state.assert_any_call(f"log_thread:{guild.id}:afk", "201")
+
+    async def test_active_thread_preferred_over_archive_scan(self):
+        guild = make_guild()
+        channel = make_channel(guild)
+        active = make_thread(guild, channel, thread_id=202, name="🔴-afk")
+        channel.threads = [active]
+        guild.get_channel = MagicMock(side_effect=lambda cid: {100: channel}.get(cid))
+
+        with patch.object(logcenter, "config", make_config()):
+            with patch.object(logcenter, "state_db", self._managed_state(guild)):
+                result = await send_to_log(guild, "afk", content="test")
+
+        self.assertIsNotNone(result)
+        channel.create_thread.assert_not_called()
+        channel.archived_threads.assert_not_called()
+        active.send.assert_awaited_once()
+
+    async def test_thread_with_other_name_not_reused(self):
+        guild = make_guild()
+        channel = make_channel(guild)
+        other = make_thread(guild, channel, thread_id=203, name="другая-ветка")
+        channel.threads = [other]
+        created = make_thread(guild, channel, thread_id=204, name="🔴-afk")
+        channel.create_thread = AsyncMock(return_value=created)
+        guild.get_channel = MagicMock(side_effect=lambda cid: {100: channel}.get(cid))
+
+        with patch.object(logcenter, "config", make_config()):
+            with patch.object(logcenter, "state_db", self._managed_state(guild)):
+                result = await send_to_log(guild, "afk", content="test")
+
+        self.assertIsNotNone(result)
+        channel.create_thread.assert_awaited_once()
+        other.send.assert_not_called()
+
+    async def test_archive_scan_failure_falls_back_to_creation(self):
+        guild = make_guild()
+        channel = make_channel(guild)
+        channel.archived_threads = MagicMock(side_effect=make_forbidden())
+        created = make_thread(guild, channel, thread_id=205, name="🔴-afk")
+        channel.create_thread = AsyncMock(return_value=created)
+        guild.get_channel = MagicMock(side_effect=lambda cid: {100: channel}.get(cid))
+
+        with patch.object(logcenter, "config", make_config()):
+            with patch.object(logcenter, "state_db", self._managed_state(guild)):
+                result = await send_to_log(guild, "afk", content="test")
+
+        self.assertIsNotNone(result)
+        channel.create_thread.assert_awaited_once()
+
+    async def test_locked_thread_rejected(self):
+        guild = make_guild()
+        channel = make_channel(guild)
+        locked = make_thread(guild, channel, thread_id=206, locked=True)
+        guild.get_channel = MagicMock(side_effect=lambda cid: {100: channel}.get(cid))
+        guild.get_thread = MagicMock(side_effect=lambda cid: {206: locked}.get(cid))
+
+        with patch.object(
+            logcenter, "config", make_config(LOG_CHANNEL_ID=100, LOG_THREAD_IDS={"afk": 206})
+        ):
+            result = await send_to_log(guild, "afk", content="test")
+
+        self.assertIsNone(result)
+        locked.send.assert_not_called()
+
+    async def test_thread_of_other_parent_rejected(self):
+        guild = make_guild()
+        channel = make_channel(guild)
+        foreign_parent = make_channel(guild, channel_id=555)
+        foreign = make_thread(guild, foreign_parent, thread_id=207)
+        guild.get_channel = MagicMock(side_effect=lambda cid: {100: channel}.get(cid))
+        guild.get_thread = MagicMock(side_effect=lambda cid: {207: foreign}.get(cid))
+
+        with patch.object(
+            logcenter, "config", make_config(LOG_CHANNEL_ID=100, LOG_THREAD_IDS={"afk": 207})
+        ):
+            result = await send_to_log(guild, "afk", content="test")
+
+        self.assertIsNone(result)
+        foreign.send.assert_not_called()
+
+    async def test_non_thread_destination_rejected(self):
+        """Обычный канал вместо ветки — не точка доставки логов."""
+        guild = make_guild()
+        channel = make_channel(guild)
+        impostor = make_channel(guild, channel_id=208)
+        guild.get_channel = MagicMock(
+            side_effect=lambda cid: {100: channel, 208: impostor}.get(cid)
+        )
+
+        with patch.object(
+            logcenter, "config", make_config(LOG_CHANNEL_ID=100, LOG_THREAD_IDS={"afk": 208})
+        ):
+            result = await send_to_log(guild, "afk", content="test")
+
+        self.assertIsNone(result)
+        impostor.send.assert_not_called()
+
+
+class TestDeliveryCounters(unittest.IsolatedAsyncioTestCase):
+    """Issue #22: потери аудита видны в счётчиках."""
+
+    def setUp(self):
+        logcenter.reset_delivery_stats()
+        self.addCleanup(logcenter.reset_delivery_stats)
+
+    async def _send_ok(self):
+        guild = make_guild()
+        channel = make_channel(guild)
+        thread = make_thread(guild, channel)
+        guild.get_channel = MagicMock(side_effect=lambda cid: {100: channel}.get(cid))
+        guild.get_thread = MagicMock(side_effect=lambda cid: {200: thread}.get(cid))
+        with patch.object(
+            logcenter, "config", make_config(LOG_CHANNEL_ID=100, LOG_THREAD_IDS={"afk": 200})
+        ):
+            return await send_to_log(guild, "afk", content="test")
+
+    async def test_successful_send_counted(self):
+        await self._send_ok()
+
+        self.assertEqual(logcenter.delivery_stats()["sent"], 1)
+        self.assertEqual(logcenter.delivery_stats()["failed"], 0)
+
+    async def test_rejected_destination_counted(self):
+        guild = make_guild()
+
+        with patch.object(logcenter, "config", make_config(LOG_CHANNEL_ID=100)):
+            await send_to_log(guild, "afk", content="test")
+
+        self.assertEqual(logcenter.delivery_stats()["rejected"], 1)
+
+    async def test_api_failure_counted(self):
+        guild = make_guild()
+        channel = make_channel(guild)
+        thread = make_thread(guild, channel)
+        thread.send = AsyncMock(side_effect=http_exception())
+        guild.get_channel = MagicMock(side_effect=lambda cid: {100: channel}.get(cid))
+        guild.get_thread = MagicMock(side_effect=lambda cid: {200: thread}.get(cid))
+
+        with patch.object(
+            logcenter, "config", make_config(LOG_CHANNEL_ID=100, LOG_THREAD_IDS={"afk": 200})
+        ):
+            await send_to_log(guild, "afk", content="test")
+
+        self.assertEqual(logcenter.delivery_stats()["failed"], 1)
+
+    async def test_repeated_failures_raise_critical_alert(self):
+        guild = make_guild()
+
+        with patch.object(logcenter, "config", make_config(LOG_CHANNEL_ID=100)):
+            with patch.object(logcenter.logger, "critical") as mock_critical:
+                for _ in range(logcenter.DEGRADED_ALERT_THRESHOLD):
+                    await send_to_log(guild, "afk", content="test")
+
+        mock_critical.assert_called()
+
+    async def test_success_resets_failure_streak(self):
+        guild = make_guild()
+        with patch.object(logcenter, "config", make_config(LOG_CHANNEL_ID=100)):
+            await send_to_log(guild, "afk", content="test")
+
+        await self._send_ok()
+
+        with patch.object(logcenter, "config", make_config(LOG_CHANNEL_ID=100)):
+            with patch.object(logcenter.logger, "critical") as mock_critical:
+                await send_to_log(guild, "afk", content="test")
+
+        mock_critical.assert_not_called()
 
 
 class TestAuditChannelPrivacy(unittest.TestCase):

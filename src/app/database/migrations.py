@@ -1,43 +1,60 @@
-"""Версионирование схемы SQLite.
+"""Версионирование схемы SQLite: preflight, backup, verified rebuild.
 
-База у бота одна на инстанс, поэтому изменение схемы должно быть
-воспроизводимым и безопасным для уже запущенных установок. Миграции ниже
-идемпотентны: их можно вызывать при каждом старте, состояние фиксируется в
-`PRAGMA user_version`.
+Схема базы описана в ``database/schema.py`` — это единственный источник
+правды. Порядок работы ``migrate_schema`` (issue #18):
+
+1. **Preflight.** Фактическая структура читается через PRAGMA
+   (``table_info``, ``index_list``, ``index_info``, ``foreign_key_list``),
+   а не по наличию одной колонки. Расхождение по PK/UNIQUE/NOT NULL —
+   повод перестроить таблицу, а не молча писать в неё upsert.
+2. **Backup.** Перед разрушительным шагом создаётся копия файла БД
+   штатным `sqlite3.Connection.backup`. Путь копии пишется в лог.
+3. **Rebuild.** Таблица пересоздаётся по канону, данные переносятся
+   в одной транзакции, число строк сверяется до и после. Несовпадение —
+   откат и отказ с инструкцией оператору.
+4. **Verify.** После миграции структура проверяется ещё раз; остаточные
+   проблемы поднимают ``SchemaError`` вместо тихого продолжения.
+
+Версия схемы фиксируется в ``PRAGMA user_version`` и пишется в лог.
 """
 
 from __future__ import annotations
 
+import os
+import sqlite3
 from collections.abc import Callable
 from datetime import datetime
 from sqlite3 import Connection
 
-from .db import get_db
+import config
+from utils import clock
+from utils.logger import logger
 
-LATEST_SCHEMA_VERSION = 3
+from .db import connect
+from .schema import (
+    ACTIVE_STATUSES,
+    ALL_STATUSES,
+    STATUS_CLOSED,
+    TABLES,
+    Table,
+)
+
+LATEST_SCHEMA_VERSION = 4
 LEGACY_GUILD_ID = 0
+BACKUP_SUFFIX = ".pre-migration"
+MAX_BACKUPS = 5
 
 
-def migrate_schema() -> None:
-    """Применяет все миграции схемы БД."""
-    conn = get_db()
-    try:
-        current_version = _user_version(conn)
-        for version, migration in MIGRATIONS:
-            if current_version < version:
-                migration(conn)
-                conn.execute(f"PRAGMA user_version = {version}")
-                conn.commit()
-                current_version = version
-    finally:
-        conn.close()
+class SchemaError(RuntimeError):
+    """Схема не соответствует ожиданиям и не может быть исправлена молча."""
 
 
-def _user_version(conn: Connection) -> int:
-    return int(conn.execute("PRAGMA user_version").fetchone()[0])
+# ---------------------------------------------------------------------------
+# Чтение фактической структуры (PRAGMA)
+# ---------------------------------------------------------------------------
 
 
-def _table_exists(conn: Connection, name: str) -> bool:
+def table_exists(conn: Connection, name: str) -> bool:
     row = conn.execute(
         "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?",
         (name,),
@@ -45,358 +62,332 @@ def _table_exists(conn: Connection, name: str) -> bool:
     return row is not None
 
 
-def _columns(conn: Connection, table: str) -> set[str]:
-    if not _table_exists(conn, table):
-        return set()
-    return {row["name"] for row in conn.execute(f"PRAGMA table_info({table})")}
+def columns_of(conn: Connection, table: str) -> dict[str, sqlite3.Row]:
+    if not table_exists(conn, table):
+        return {}
+    return {row["name"]: row for row in conn.execute(f"PRAGMA table_info({table})")}
 
 
-def _drop_table(conn: Connection, name: str) -> None:
-    conn.execute(f"DROP TABLE IF EXISTS {name}")
+def primary_key_of(conn: Connection, table: str) -> tuple[str, ...]:
+    rows = [row for row in conn.execute(f"PRAGMA table_info({table})") if row["pk"]]
+    rows.sort(key=lambda row: row["pk"])
+    return tuple(row["name"] for row in rows)
+
+
+def unique_sets_of(conn: Connection, table: str) -> set[frozenset[str]]:
+    """Уникальные наборы колонок: из индексов и из объявления PK."""
+    found: set[frozenset[str]] = set()
+    for index in conn.execute(f"PRAGMA index_list({table})"):
+        if not index["unique"]:
+            continue
+        if index["partial"]:
+            # partial unique проверяется отдельно: он не гарантирует upsert
+            continue
+        cols = {row["name"] for row in conn.execute(f"PRAGMA index_info({index['name']})")}
+        if cols:
+            found.add(frozenset(cols))
+    pk = primary_key_of(conn, table)
+    if pk:
+        found.add(frozenset(pk))
+    return found
+
+
+def index_names_of(conn: Connection, table: str) -> set[str]:
+    return {row["name"] for row in conn.execute(f"PRAGMA index_list({table})")}
+
+
+def inspect_table(conn: Connection, table: Table) -> list[str]:
+    """Расхождения фактической таблицы с каноном. Пустой список — всё ок."""
+    if not table_exists(conn, table.name):
+        return [f"таблица {table.name} отсутствует"]
+
+    problems: list[str] = []
+    actual_columns = columns_of(conn, table.name)
+
+    missing = [name for name in table.columns if name not in actual_columns]
+    if missing:
+        problems.append(f"{table.name}: нет колонок {', '.join(missing)}")
+
+    actual_pk = primary_key_of(conn, table.name)
+    if set(actual_pk) != set(table.primary_key):
+        problems.append(
+            f"{table.name}: PRIMARY KEY ({', '.join(actual_pk) or '—'}) "
+            f"вместо ({', '.join(table.primary_key)})"
+        )
+
+    actual_unique = unique_sets_of(conn, table.name)
+    for expected in table.unique:
+        if frozenset(expected) not in actual_unique:
+            problems.append(f"{table.name}: нет UNIQUE({', '.join(expected)})")
+
+    for name in table.not_null:
+        column = actual_columns.get(name)
+        if column is not None and not column["notnull"]:
+            problems.append(f"{table.name}: колонка {name} допускает NULL")
+
+    return problems
+
+
+def inspect_schema(conn: Connection) -> list[str]:
+    """Полный preflight по всем таблицам канона."""
+    problems: list[str] = []
+    for table in TABLES:
+        problems.extend(inspect_table(conn, table))
+    return problems
+
+
+# ---------------------------------------------------------------------------
+# Backup
+# ---------------------------------------------------------------------------
+
+
+def _backup_path(db_path: str) -> str:
+    stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+    return f"{db_path}{BACKUP_SUFFIX}.{stamp}"
+
+
+def _prune_backups(db_path: str) -> None:
+    directory = os.path.dirname(db_path) or "."
+    prefix = f"{os.path.basename(db_path)}{BACKUP_SUFFIX}."
+    try:
+        names = sorted(name for name in os.listdir(directory) if name.startswith(prefix))
+    except OSError:
+        return
+    for name in names[:-MAX_BACKUPS]:
+        try:
+            os.unlink(os.path.join(directory, name))
+        except OSError as error:
+            logger.warning(f"migrations: не удалось удалить старый бэкап {name}: {error}")
+
+
+def create_backup(conn: Connection, db_path: str | None = None) -> str | None:
+    """Копия базы перед разрушительной миграцией. None — БД в памяти."""
+    target_db = db_path or config.DB_PATH
+    if not target_db or target_db == ":memory:" or not os.path.exists(target_db):
+        return None
+
+    path = _backup_path(target_db)
+    try:
+        backup_conn = connect(path)
+        try:
+            conn.backup(backup_conn)
+        finally:
+            backup_conn.close()
+        _prune_backups(target_db)
+    except (sqlite3.Error, OSError) as error:
+        logger.error(f"migrations: не удалось создать бэкап БД: {error}")
+        try:
+            if os.path.exists(path):
+                os.unlink(path)
+        except OSError:
+            pass
+        raise SchemaError(
+            "не удалось создать резервную копию базы перед миграцией; "
+            "миграция отменена, проверьте свободное место и права на каталог БД"
+        ) from error
+    logger.info(f"migrations: создан бэкап базы перед миграцией: {path}")
+    return path
+
+
+# ---------------------------------------------------------------------------
+# Verified rebuild
+# ---------------------------------------------------------------------------
+
+
+def _row_count(conn: Connection, table: str) -> int:
+    return int(conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0])
+
+
+def rebuild_table(conn: Connection, table: Table, *, reason: str) -> None:
+    """Пересоздаёт таблицу по канону с переносом данных и сверкой строк.
+
+    Вызывается внутри транзакции миграции. При расхождении числа строк
+    бросает SchemaError — вызывающий код откатывает транзакцию.
+    """
+    exists = table_exists(conn, table.name)
+    if not exists:
+        conn.execute(table.create_sql)
+        for index_sql in table.indexes:
+            conn.execute(index_sql)
+        return
+
+    logger.warning(f"migrations: перестраиваю таблицу {table.name} ({reason})")
+    before = _row_count(conn, table.name)
+    existing_columns = set(columns_of(conn, table.name))
+    temp_name = f"{table.name}__migrating"
+
+    conn.execute(f"DROP TABLE IF EXISTS {temp_name}")
+    conn.execute(f"ALTER TABLE {table.name} RENAME TO {temp_name}")
+    conn.execute(table.create_sql)
+
+    select_parts = []
+    for column in table.columns:
+        if column in existing_columns:
+            default = table.copy_defaults.get(column)
+            if default is not None:
+                select_parts.append(f"COALESCE({column}, {default}) AS {column}")
+            else:
+                select_parts.append(column)
+        elif column in table.copy_defaults:
+            select_parts.append(f"{table.copy_defaults[column]} AS {column}")
+        else:
+            select_parts.append(f"NULL AS {column}")
+
+    columns_sql = ", ".join(table.columns)
+    conn.execute(
+        f"INSERT INTO {table.name} ({columns_sql}) "
+        f"SELECT {', '.join(select_parts)} FROM {temp_name}"
+    )
+
+    after = _row_count(conn, table.name)
+    if after != before:
+        raise SchemaError(
+            f"перенос таблицы {table.name} потерял данные: было {before} строк, "
+            f"перенесено {after}. Миграция отменена, база не изменена — "
+            f"восстановите её из бэкапа рядом с файлом БД и сообщите разработчикам"
+        )
+
+    conn.execute(f"DROP TABLE {temp_name}")
+    for index_sql in table.indexes:
+        conn.execute(index_sql)
+
+
+def ensure_table(conn: Connection, table: Table) -> None:
+    """Приводит таблицу к канону: индексы либо полный rebuild."""
+    problems = inspect_table(conn, table)
+    if not problems:
+        for index_sql in table.indexes:
+            conn.execute(index_sql)
+        return
+    rebuild_table(conn, table, reason="; ".join(problems))
+
+
+# ---------------------------------------------------------------------------
+# Миграции
+# ---------------------------------------------------------------------------
+
+
+def _user_version(conn: Connection) -> int:
+    return int(conn.execute("PRAGMA user_version").fetchone()[0])
 
 
 def _migration_1_initial_schema(conn: Connection) -> None:
-    """Базовая схема до разделения данных по guild_id.
-
-    Она совпадает с исторической структурой проекта и нужна, чтобы новая
-    установка и старая база проходили через один и тот же путь миграции.
-    """
-    conn.execute(
-        """
-        CREATE TABLE IF NOT EXISTS tickets (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            channel_id INTEGER UNIQUE,
-            user_id INTEGER NOT NULL,
-            user_name TEXT,
-            topic TEXT NOT NULL,
-            type TEXT,
-            answers TEXT,
-            status TEXT DEFAULT 'open',
-            created_at TEXT NOT NULL,
-            closed_at TEXT,
-            closed_by INTEGER,
-            reason TEXT
-        )
-        """
-    )
-    conn.execute(
-        """
-        CREATE TABLE IF NOT EXISTS stats (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            date TEXT UNIQUE,
-            total_applications INTEGER DEFAULT 0,
-            accepted INTEGER DEFAULT 0,
-            denied INTEGER DEFAULT 0
-        )
-        """
-    )
-    conn.execute(
-        """
-        CREATE TABLE IF NOT EXISTS afk_users (
-            user_id INTEGER NOT NULL,
-            guild_id INTEGER NOT NULL,
-            afk_reason TEXT DEFAULT 'Отошёл',
-            afk_since TEXT NOT NULL,
-            estimated_return TEXT,
-            original_nick TEXT,
-            is_afk INTEGER DEFAULT 1,
-            PRIMARY KEY (user_id, guild_id)
-        )
-        """
-    )
-    conn.execute(
-        """
-        CREATE TABLE IF NOT EXISTS afk_cooldown (
-            mentioner_id INTEGER NOT NULL,
-            afk_user_id INTEGER NOT NULL,
-            last_reply TEXT NOT NULL,
-            PRIMARY KEY (mentioner_id, afk_user_id)
-        )
-        """
-    )
-    conn.execute(
-        """
-        CREATE TABLE IF NOT EXISTS afk_stats (
-            user_id INTEGER PRIMARY KEY,
-            total_afk_count INTEGER DEFAULT 0,
-            total_afk_seconds INTEGER DEFAULT 0,
-            longest_afk_seconds INTEGER DEFAULT 0
-        )
-        """
-    )
+    """Базовая схема. Новая установка и историческая база идут одним путём."""
+    for table in TABLES:
+        if not table_exists(conn, table.name):
+            conn.execute(table.create_sql)
+            for index_sql in table.indexes:
+                conn.execute(index_sql)
 
 
 def _migration_2_guild_scoped_data(conn: Connection) -> None:
-    """Добавляет изоляцию данных по Discord guild_id."""
-    _migrate_tickets(conn)
-    _migrate_stats(conn)
-    _migrate_afk_users(conn)
-    _migrate_afk_cooldown(conn)
-    _migrate_afk_stats(conn)
+    """Изоляция данных по guild_id и корректные ограничения."""
+    _close_duplicate_active_tickets(conn)
+    for table in TABLES:
+        ensure_table(conn, table)
 
 
-def _migrate_tickets(conn: Connection) -> None:
-    cols = _columns(conn, "tickets")
-    if not cols:
-        _create_tickets(conn)
-    elif "guild_id" not in cols:
-        conn.execute("ALTER TABLE tickets ADD COLUMN guild_id INTEGER NOT NULL DEFAULT 0")
-
-    _close_duplicate_open_tickets(conn)
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_tickets_guild ON tickets(guild_id)")
-    conn.execute(
-        """
-        CREATE INDEX IF NOT EXISTS idx_tickets_guild_user_status
-        ON tickets(guild_id, user_id, status)
-        """
-    )
-    conn.execute(
-        """
-        CREATE UNIQUE INDEX IF NOT EXISTS idx_tickets_one_open_per_user
-        ON tickets(guild_id, user_id)
-        WHERE status = 'open' AND user_id != 0
-        """
-    )
+def _migration_3_erasure_support(conn: Connection) -> None:
+    """Связь тикета с логами (log_message_ids) и bot_state."""
+    for table in TABLES:
+        ensure_table(conn, table)
 
 
-def _create_tickets(conn: Connection) -> None:
-    conn.execute(
-        """
-        CREATE TABLE IF NOT EXISTS tickets (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            guild_id INTEGER NOT NULL,
-            channel_id INTEGER NOT NULL UNIQUE,
-            user_id INTEGER NOT NULL,
-            user_name TEXT,
-            topic TEXT NOT NULL,
-            type TEXT,
-            answers TEXT,
-            status TEXT DEFAULT 'open',
-            created_at TEXT NOT NULL,
-            closed_at TEXT,
-            closed_by INTEGER,
-            reason TEXT
-        )
-        """
-    )
+def _migration_4_utc_timestamps(conn: Connection) -> None:
+    """Единый формат времени: UTC ISO 8601 с явным смещением.
+
+    Наивные значения прошлых версий трактуются как время в
+    ``config.LEGACY_TIMEZONE`` (по умолчанию UTC) и переводятся в UTC,
+    чтобы сравнение строк в SQL совпадало с хронологией.
+    """
+    for table in TABLES:
+        ensure_table(conn, table)
+    for table in TABLES:
+        for column in table.datetime_columns:
+            _normalize_datetime_column(conn, table.name, column)
 
 
-def _close_duplicate_open_tickets(conn: Connection) -> None:
-    """Закрывает исторические дубли перед созданием partial unique index."""
-    duplicate_groups = conn.execute(
-        """
-        SELECT guild_id, user_id
-        FROM tickets
-        WHERE status = 'open' AND user_id != 0
-        GROUP BY guild_id, user_id
-        HAVING COUNT(*) > 1
-        """
+def _normalize_datetime_column(conn: Connection, table: str, column: str) -> None:
+    rows = conn.execute(
+        f"SELECT rowid AS rid, {column} AS value FROM {table} "
+        f"WHERE {column} IS NOT NULL AND {column} != ''"
     ).fetchall()
-    if not duplicate_groups:
+    for row in rows:
+        parsed = clock.parse_db(row["value"])
+        if parsed is None:
+            continue
+        normalized = clock.to_db(parsed)
+        if normalized != row["value"]:
+            conn.execute(
+                f"UPDATE {table} SET {column} = ? WHERE rowid = ?",
+                (normalized, row["rid"]),
+            )
+
+
+def _close_duplicate_active_tickets(conn: Connection) -> None:
+    """Закрывает исторические дубли перед созданием partial unique index."""
+    if not table_exists(conn, "tickets"):
+        return
+    available = set(columns_of(conn, "tickets"))
+    if not {"status", "user_id"} <= available:
         return
 
-    now = datetime.now().isoformat()
-    for group in duplicate_groups:
+    # В старых схемах колонки guild_id ещё нет — тогда группируем только по
+    # пользователю. Литерал в GROUP BY нельзя: SQLite примет его за номер колонки.
+    has_guild = "guild_id" in available
+    placeholders = ", ".join("?" for _ in ACTIVE_STATUSES)
+    group_columns = "guild_id, user_id" if has_guild else "user_id"
+    groups = conn.execute(
+        f"""
+        SELECT {group_columns}
+        FROM tickets
+        WHERE status IN ({placeholders}) AND user_id != 0
+        GROUP BY {group_columns}
+        HAVING COUNT(*) > 1
+        """,
+        ACTIVE_STATUSES,
+    ).fetchall()
+    if not groups:
+        return
+
+    now = clock.to_db()
+    for group in groups:
+        scope_clause = "guild_id = ? AND user_id = ?" if has_guild else "user_id = ?"
+        scope_params = (group["guild_id"], group["user_id"]) if has_guild else (group["user_id"],)
         rows = conn.execute(
-            """
+            f"""
             SELECT id
             FROM tickets
-            WHERE guild_id = ? AND user_id = ? AND status = 'open'
+            WHERE {scope_clause} AND status IN ({placeholders})
             ORDER BY created_at DESC, id DESC
             """,
-            (group["guild_id"], group["user_id"]),
+            (*scope_params, *ACTIVE_STATUSES),
         ).fetchall()
         duplicate_ids = [row["id"] for row in rows[1:]]
         if not duplicate_ids:
             continue
-        placeholders = ",".join("?" for _ in duplicate_ids)
+        id_placeholders = ",".join("?" for _ in duplicate_ids)
         conn.execute(
             f"""
             UPDATE tickets
-            SET status = 'closed',
+            SET status = '{STATUS_CLOSED}',
                 closed_at = COALESCE(closed_at, ?),
                 reason = COALESCE(reason, 'closed by migration: duplicate open ticket')
-            WHERE id IN ({placeholders})
+            WHERE id IN ({id_placeholders})
             """,
             (now, *duplicate_ids),
         )
 
 
-def _migrate_stats(conn: Connection) -> None:
-    cols = _columns(conn, "stats")
-    if not cols:
-        _create_stats(conn)
+def _normalize_unknown_statuses(conn: Connection) -> None:
+    """Значения статуса вне словаря мешают CHECK-ограничению при rebuild."""
+    if not table_exists(conn, "tickets") or "status" not in columns_of(conn, "tickets"):
         return
-    if "guild_id" in cols:
-        conn.execute("CREATE INDEX IF NOT EXISTS idx_stats_guild_date ON stats(guild_id, date)")
-        return
-
-    _drop_table(conn, "stats_v1")
-    conn.execute("ALTER TABLE stats RENAME TO stats_v1")
-    _create_stats(conn)
+    placeholders = ", ".join("?" for _ in ALL_STATUSES)
     conn.execute(
-        """
-        INSERT INTO stats (guild_id, date, total_applications, accepted, denied)
-        SELECT ?, date, total_applications, accepted, denied
-        FROM stats_v1
-        """,
-        (LEGACY_GUILD_ID,),
-    )
-    _drop_table(conn, "stats_v1")
-
-
-def _create_stats(conn: Connection) -> None:
-    conn.execute(
-        """
-        CREATE TABLE IF NOT EXISTS stats (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            guild_id INTEGER NOT NULL,
-            date TEXT NOT NULL,
-            total_applications INTEGER DEFAULT 0,
-            accepted INTEGER DEFAULT 0,
-            denied INTEGER DEFAULT 0,
-            UNIQUE(guild_id, date)
-        )
-        """
-    )
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_stats_guild_date ON stats(guild_id, date)")
-
-
-def _migrate_afk_users(conn: Connection) -> None:
-    cols = _columns(conn, "afk_users")
-    if not cols:
-        _create_afk_users(conn)
-        return
-    if "original_nick" not in cols:
-        conn.execute("ALTER TABLE afk_users ADD COLUMN original_nick TEXT")
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_afk_users_guild ON afk_users(guild_id)")
-
-
-def _create_afk_users(conn: Connection) -> None:
-    conn.execute(
-        """
-        CREATE TABLE IF NOT EXISTS afk_users (
-            user_id INTEGER NOT NULL,
-            guild_id INTEGER NOT NULL,
-            afk_reason TEXT DEFAULT 'Отошёл',
-            afk_since TEXT NOT NULL,
-            estimated_return TEXT,
-            original_nick TEXT,
-            is_afk INTEGER DEFAULT 1,
-            PRIMARY KEY (user_id, guild_id)
-        )
-        """
-    )
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_afk_users_guild ON afk_users(guild_id)")
-
-
-def _migrate_afk_cooldown(conn: Connection) -> None:
-    cols = _columns(conn, "afk_cooldown")
-    if not cols:
-        _create_afk_cooldown(conn)
-        return
-    if "guild_id" in cols:
-        conn.execute(
-            """
-            CREATE INDEX IF NOT EXISTS idx_afk_cooldown_guild
-            ON afk_cooldown(guild_id)
-            """
-        )
-        return
-
-    _drop_table(conn, "afk_cooldown_v1")
-    conn.execute("ALTER TABLE afk_cooldown RENAME TO afk_cooldown_v1")
-    _create_afk_cooldown(conn)
-    conn.execute(
-        """
-        INSERT OR IGNORE INTO afk_cooldown (guild_id, mentioner_id, afk_user_id, last_reply)
-        SELECT ?, mentioner_id, afk_user_id, last_reply
-        FROM afk_cooldown_v1
-        """,
-        (LEGACY_GUILD_ID,),
-    )
-    _drop_table(conn, "afk_cooldown_v1")
-
-
-def _create_afk_cooldown(conn: Connection) -> None:
-    conn.execute(
-        """
-        CREATE TABLE IF NOT EXISTS afk_cooldown (
-            guild_id INTEGER NOT NULL,
-            mentioner_id INTEGER NOT NULL,
-            afk_user_id INTEGER NOT NULL,
-            last_reply TEXT NOT NULL,
-            PRIMARY KEY (guild_id, mentioner_id, afk_user_id)
-        )
-        """
-    )
-    conn.execute(
-        """
-        CREATE INDEX IF NOT EXISTS idx_afk_cooldown_guild
-        ON afk_cooldown(guild_id)
-        """
-    )
-
-
-def _migrate_afk_stats(conn: Connection) -> None:
-    cols = _columns(conn, "afk_stats")
-    if not cols:
-        _create_afk_stats(conn)
-        return
-    if "guild_id" in cols:
-        conn.execute("CREATE INDEX IF NOT EXISTS idx_afk_stats_guild ON afk_stats(guild_id)")
-        return
-
-    _drop_table(conn, "afk_stats_v1")
-    conn.execute("ALTER TABLE afk_stats RENAME TO afk_stats_v1")
-    _create_afk_stats(conn)
-    conn.execute(
-        """
-        INSERT OR IGNORE INTO afk_stats (
-            guild_id, user_id, total_afk_count, total_afk_seconds, longest_afk_seconds
-        )
-        SELECT ?, user_id, total_afk_count, total_afk_seconds, longest_afk_seconds
-        FROM afk_stats_v1
-        """,
-        (LEGACY_GUILD_ID,),
-    )
-    _drop_table(conn, "afk_stats_v1")
-
-
-def _create_afk_stats(conn: Connection) -> None:
-    conn.execute(
-        """
-        CREATE TABLE IF NOT EXISTS afk_stats (
-            guild_id INTEGER NOT NULL,
-            user_id INTEGER NOT NULL,
-            total_afk_count INTEGER DEFAULT 0,
-            total_afk_seconds INTEGER DEFAULT 0,
-            longest_afk_seconds INTEGER DEFAULT 0,
-            PRIMARY KEY (guild_id, user_id)
-        )
-        """
-    )
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_afk_stats_guild ON afk_stats(guild_id)")
-
-
-def _migration_3_erasure_support(conn: Connection) -> None:
-    """Поддержка удаления данных и управляемого лог-центра.
-
-    tickets.log_message_ids — JSON-массив пар [thread_id, message_id]:
-    связь тикета с сообщениями лог-центра (в т.ч. транскриптами), чтобы
-    удаление персональных данных и ретенция могли стирать вложения.
-    bot_state — служебное key-value хранилище (ID объектов, созданных ботом).
-    """
-    cols = _columns(conn, "tickets")
-    if "log_message_ids" not in cols:
-        conn.execute("ALTER TABLE tickets ADD COLUMN log_message_ids TEXT")
-    conn.execute(
-        """
-        CREATE TABLE IF NOT EXISTS bot_state (
-            key TEXT PRIMARY KEY,
-            value TEXT NOT NULL
-        )
-        """
+        f"UPDATE tickets SET status = '{STATUS_CLOSED}' "
+        f"WHERE status IS NULL OR status NOT IN ({placeholders})",
+        ALL_STATUSES,
     )
 
 
@@ -404,4 +395,81 @@ MIGRATIONS: tuple[tuple[int, Callable[[Connection], None]], ...] = (
     (1, _migration_1_initial_schema),
     (2, _migration_2_guild_scoped_data),
     (3, _migration_3_erasure_support),
+    (4, _migration_4_utc_timestamps),
 )
+
+
+def migrate_schema(db_path: str | None = None) -> int:
+    """Применяет миграции и возвращает итоговую версию схемы.
+
+    Идемпотентна: повторный вызов на актуальной базе ничего не меняет.
+    """
+    target_db = db_path or config.DB_PATH
+    conn = connect(target_db)
+    try:
+        current_version = _user_version(conn)
+        if current_version > LATEST_SCHEMA_VERSION:
+            raise SchemaError(
+                f"база создана более новой версией бота (схема v{current_version}, "
+                f"поддерживается v{LATEST_SCHEMA_VERSION}); обновите бота или "
+                "восстановите базу из бэкапа — автоматическое понижение не выполняется"
+            )
+        if current_version == LATEST_SCHEMA_VERSION:
+            problems = inspect_schema(conn)
+            if not problems:
+                return current_version
+            logger.warning(
+                "migrations: схема отмечена как актуальная, но структура расходится "
+                f"с ожидаемой: {'; '.join(problems)}"
+            )
+
+        pending = [item for item in MIGRATIONS if item[0] > current_version]
+        needs_repair = bool(inspect_schema(conn)) and current_version >= 1
+        if not pending and not needs_repair:
+            return current_version
+
+        has_data = current_version > 0 and any(
+            table_exists(conn, table.name) and _row_count(conn, table.name) for table in TABLES
+        )
+        if has_data:
+            create_backup(conn, target_db)
+
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            _normalize_unknown_statuses(conn)
+            for version, migration in MIGRATIONS:
+                if version <= current_version:
+                    continue
+                migration(conn)
+                conn.execute(f"PRAGMA user_version = {version}")
+                current_version = version
+            if needs_repair:
+                for table in TABLES:
+                    ensure_table(conn, table)
+                conn.execute(f"PRAGMA user_version = {LATEST_SCHEMA_VERSION}")
+                current_version = LATEST_SCHEMA_VERSION
+            conn.commit()
+        except BaseException:
+            conn.rollback()
+            raise
+
+        problems = inspect_schema(conn)
+        if problems:
+            raise SchemaError(
+                "после миграции структура базы всё ещё не соответствует ожидаемой: "
+                f"{'; '.join(problems)}. База не тронута дальше — восстановите её "
+                "из бэкапа рядом с файлом БД и сообщите разработчикам"
+            )
+
+        logger.info(f"migrations: схема базы приведена к версии v{current_version}")
+        return current_version
+    finally:
+        conn.close()
+
+
+def schema_version(db_path: str | None = None) -> int:
+    conn = connect(db_path or config.DB_PATH)
+    try:
+        return _user_version(conn)
+    finally:
+        conn.close()

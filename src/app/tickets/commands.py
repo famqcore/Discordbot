@@ -1,10 +1,16 @@
+"""Префиксные команды заявок и панель подачи."""
+
+from __future__ import annotations
+
 import discord
 from discord.ext import commands
 
 import config
+from database.schema import STATUS_ACCEPTED, STATUS_DENIED
 from database.tickets_db import get_all_tickets, get_open_ticket_for_user, get_stats
+from utils.errors import InteractionErrorBoundary, new_correlation_id
 from utils.logger import logger
-from utils.mentions import mentions_for
+from utils.mentions import escape_user_text, mentions_for
 from utils.ratelimit import retry_after
 
 from .create_ticket import TicketModal
@@ -39,6 +45,8 @@ class TicketTypeView(discord.ui.View):
         )
         user_id = getattr(getattr(interaction, "user", None), "id", None)
         if isinstance(guild_id, int) and isinstance(user_id, int):
+            # проверка активной заявки и кулдаун до открытия формы:
+            # пользователь не тратит время на анкету, которую нельзя подать
             wait = retry_after(
                 ("ticket_type", guild_id, user_id), config.TICKET_BUTTON_COOLDOWN_SECONDS
             )
@@ -60,20 +68,22 @@ class TicketTypeView(discord.ui.View):
         await interaction.response.send_modal(TicketModal(title, ticket_type, fields))
 
     async def rp_callback(self, interaction: discord.Interaction):
-        await self._send_modal_or_existing_ticket(
-            interaction,
-            config.TICKET_RP_TITLE,
-            "rp",
-            config.RP_FIELDS,
-        )
+        async with InteractionErrorBoundary(interaction, "ticket.form_open", ticket_type="rp"):
+            await self._send_modal_or_existing_ticket(
+                interaction,
+                config.TICKET_RP_TITLE,
+                "rp",
+                config.RP_FIELDS,
+            )
 
     async def capt_callback(self, interaction: discord.Interaction):
-        await self._send_modal_or_existing_ticket(
-            interaction,
-            config.TICKET_CAPT_TITLE,
-            "capt",
-            config.CAPT_FIELDS,
-        )
+        async with InteractionErrorBoundary(interaction, "ticket.form_open", ticket_type="capt"):
+            await self._send_modal_or_existing_ticket(
+                interaction,
+                config.TICKET_CAPT_TITLE,
+                "capt",
+                config.CAPT_FIELDS,
+            )
 
 
 class DeleteUserDataConfirmView(discord.ui.View):
@@ -103,9 +113,14 @@ class DeleteUserDataConfirmView(discord.ui.View):
             counts = await erase_user_data(interaction.guild, self.member)
             await audit_erasure(interaction.guild, interaction.user, self.member, counts)
             text = config.PRIVACY_DELETE_DONE.format(**counts)
-        except Exception as e:
-            logger.error(f"erasure: удаление данных {self.member.id} не завершилось: {e}")
-            text = config.PRIVACY_DELETE_FAILED
+        except Exception as error:  # noqa: BLE001 - границы административной операции
+            correlation_id = new_correlation_id()
+            logger.exception(
+                f"erasure outcome=error error_type={type(error).__name__} "
+                f"subject_id={self.member.id} guild_id={getattr(interaction.guild, 'id', None)} "
+                f"correlation_id={correlation_id}"
+            )
+            text = f"{config.PRIVACY_DELETE_FAILED}\nКод для администратора: `{correlation_id}`"
         await interaction.edit_original_response(
             content=text, view=None, allowed_mentions=mentions_for()
         )
@@ -157,7 +172,7 @@ class TicketsCog(commands.Cog):
             ]
             embed.add_field(name="По дням", value="\n".join(lines)[:1024], inline=False)
 
-        await ctx.send(embed=embed)
+        await ctx.send(embed=embed, allowed_mentions=mentions_for())
 
     @commands.command(name=config.CMD_HISTORY)
     @commands.guild_only()
@@ -172,14 +187,15 @@ class TicketsCog(commands.Cog):
 
         embed = discord.Embed(title="История заявок", color=discord.Color.blue())
         for t in tickets:
-            emoji = "✅" if t["status"] == "accepted" else "❌" if t["status"] == "denied" else "🟡"
+            status = t["status"]
+            emoji = "✅" if status == STATUS_ACCEPTED else "❌" if status == STATUS_DENIED else "🟡"
             user_text = "Удалённый пользователь" if t["user_id"] == 0 else f"<@{t['user_id']}>"
             embed.add_field(
-                name=f"{emoji} {t['topic']}",
+                name=f"{emoji} {escape_user_text(t['topic'])}"[:256],
                 value=f"От: {user_text}\n{t['created_at'][:10]}",
                 inline=False,
             )
-        await ctx.send(embed=embed)
+        await ctx.send(embed=embed, allowed_mentions=mentions_for())
 
     @commands.command(name=config.CMD_DELETE_USER_DATA)
     @commands.guild_only()

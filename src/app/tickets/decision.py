@@ -1,16 +1,20 @@
+"""Решение по заявке: «Принять» / «Отказать» (issue #3)."""
+
+from __future__ import annotations
+
 from dataclasses import dataclass
-from datetime import datetime
 
 import discord
 
 import config
-from database.tickets_db import add_log_message_id, get_ticket, update_ticket_status
-from utils.logcenter import LOG_KEY_DECISIONS, send_to_log
+from database.schema import STATUS_ACCEPTED, STATUS_DENIED
+from utils import clock
+from utils.errors import InteractionErrorBoundary
 from utils.logger import logger
 from utils.mentions import escape_user_text, mentions_for
 from utils.permissions import is_staff
 
-from .transcript import build_transcript_file
+from .workflow import claim_ticket, complete_terminal_action, ticket_for_channel
 
 
 @dataclass(frozen=True)
@@ -27,7 +31,7 @@ class Decision:
 
 
 ACCEPT = Decision(
-    status="accepted",
+    status=STATUS_ACCEPTED,
     modal_title="Принятие заявки",
     reason_label="Причина принятия",
     embed_title=config.ACCEPT_EMBED_TITLE,
@@ -39,7 +43,7 @@ ACCEPT = Decision(
 )
 
 DENY = Decision(
-    status="denied",
+    status=STATUS_DENIED,
     modal_title="Отклонение заявки",
     reason_label="Причина отказа",
     embed_title=config.DENY_EMBED_TITLE,
@@ -68,52 +72,83 @@ class DecisionReasonModal(discord.ui.Modal):
     async def on_submit(self, interaction: discord.Interaction):
         guild = interaction.guild
         decision = self.decision
+        channel_id = getattr(self.channel, "id", None)
+        guild_id = getattr(guild, "id", None)
 
-        updated = update_ticket_status(
-            self.channel.id, decision.status, interaction.user.id, self.reason.value
-        )
-        if not updated:
+        ticket = ticket_for_channel(channel_id, guild_id)
+        if ticket is None:
             await interaction.response.send_message(config.TICKET_ALREADY_DECIDED, ephemeral=True)
             return
 
-        ticket = get_ticket(self.channel.id)
-        applicant = guild.get_member(ticket["user_id"]) if ticket and guild else None
-        mention = applicant.mention if applicant else "—"
-        # причина — ввод модератора, но доверять ему нельзя: экранируем,
-        # чтобы из решения нельзя было собрать массовый пинг
-        reason = escape_user_text(self.reason.value)
+        # захват заявки: из накликанных accept/deny/close побеждает ровно один
+        if not claim_ticket(channel_id, decision.status, guild_id):
+            await interaction.response.send_message(config.TICKET_ALREADY_DECIDED, ephemeral=True)
+            return
 
-        # заявитель должен узнать о решении, а не только молча исчезнуть вместе с каналом
-        if applicant:
-            try:
-                await applicant.send(decision.dm_text.format(reason=reason))
-            except Exception:
-                pass  # личка закрыта — не критично
+        async with InteractionErrorBoundary(
+            interaction, "ticket.decision", channel_id=channel_id, status=decision.status
+        ):
+            await interaction.response.send_message(
+                f"{decision.reply_text}. Тикет обрабатывается…", ephemeral=True
+            )
 
-        files = await build_transcript_file(self.channel)
+            applicant = guild.get_member(ticket["user_id"]) if guild else None
+            mention = applicant.mention if applicant else "—"
+            # причина — ввод модератора, но доверять ему нельзя: экранируем,
+            # чтобы из решения нельзя было собрать массовый пинг
+            reason = escape_user_text(self.reason.value)
 
-        embed = discord.Embed(
-            title=decision.embed_title,
-            color=decision.embed_color,
-            timestamp=datetime.now(),
+            await _notify_applicant(applicant, decision, reason)
+            await _announce_in_channel(self.channel, decision, mention, reason, applicant)
+
+            embed = discord.Embed(
+                title=decision.embed_title,
+                color=decision.embed_color,
+                timestamp=clock.utcnow(),
+            )
+            embed.add_field(name="Заявитель", value=mention, inline=False)
+            embed.add_field(name="Причина", value=reason, inline=False)
+            embed.add_field(name="Рекрут", value=interaction.user.mention, inline=False)
+
+            outcome = await complete_terminal_action(
+                guild=guild,
+                channel=self.channel,
+                status=decision.status,
+                actor=interaction.user,
+                reason=self.reason.value,
+                embed=embed,
+            )
+
+            if not outcome.ok:
+                await interaction.followup.send(outcome.reason, ephemeral=True)
+                return
+
+            if outcome.transcript_note and not outcome.transcript_note.startswith("✅"):
+                await interaction.followup.send(outcome.transcript_note, ephemeral=True)
+
+
+async def _notify_applicant(applicant, decision: Decision, reason: str) -> None:
+    """Заявитель узнаёт о решении до того, как канал исчезнет."""
+    if applicant is None:
+        return
+    try:
+        await applicant.send(
+            decision.dm_text.format(reason=reason), allowed_mentions=mentions_for()
         )
-        embed.add_field(name="Заявитель", value=mention, inline=False)
-        embed.add_field(name="Причина", value=reason, inline=False)
-        embed.add_field(name="Рекрут", value=interaction.user.mention, inline=False)
-        log_message = await send_to_log(guild, LOG_KEY_DECISIONS, embed=embed, files=files)
-        if log_message is not None:
-            add_log_message_id(self.channel.id, log_message.channel.id, log_message.id)
+    except discord.Forbidden:
+        pass  # личка закрыта — ожидаемо
+    except discord.HTTPException as error:
+        logger.warning(f"ticket.decision outcome=dm_failed error_type={type(error).__name__}")
 
-        await self.channel.send(
+
+async def _announce_in_channel(channel, decision, mention, reason, applicant) -> None:
+    try:
+        await channel.send(
             decision.channel_note.format(mention=mention, reason=reason),
             allowed_mentions=mentions_for(users=[applicant] if applicant else []),
         )
-        await interaction.response.send_message(
-            f"{decision.reply_text}. Тикет удаляется.", ephemeral=True
-        )
-
-        logger.info(f"Тикет {self.channel.id} {decision.log_text}, удаляю канал")
-        await self.channel.delete()
+    except (discord.Forbidden, discord.HTTPException) as error:
+        logger.warning(f"ticket.decision outcome=announce_failed error_type={type(error).__name__}")
 
 
 class DecisionButton(discord.ui.Button):

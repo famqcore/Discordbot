@@ -1,12 +1,14 @@
-import asyncio
 import unittest
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import discord
 
+import config
 from afk.commands import AfkCog
 from afk.models import format_duration
+from tests.support import FakeGuild, FakeMember
+from utils import clock
 
 
 class TestFormatDuration(unittest.TestCase):
@@ -63,272 +65,205 @@ class TestAfkCog(unittest.TestCase):
         self.assertTrue(hasattr(self.cog, "afk_remove_command"))
 
 
-class TestAfkCommand(unittest.TestCase):
+class AfkCommandTestCase(unittest.IsolatedAsyncioTestCase):
+    """Поведение префиксных команд."""
+
     def setUp(self):
-        self.loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(self.loop)
         self.bot = MagicMock()
         self.cog = AfkCog(self.bot)
+        self.guild = FakeGuild(guild_id=123)
+        self.ctx = MagicMock()
+        self.ctx.send = AsyncMock()
+        self.ctx.guild = self.guild
+        self.ctx.author = FakeMember(user_id=999, name="author")
+        self.ctx.author.roles = []
 
-    def tearDown(self):
-        self.loop.close()
+    @staticmethod
+    def _embed(mock_send):
+        call = mock_send.await_args
+        return call.kwargs.get("embed") or call.args[0]
 
-    def test_afk_sends_embed(self):
-        ctx = MagicMock()
-        ctx.send = AsyncMock()
+    async def test_afk_sends_menu_embed(self):
+        await self.cog.afk_command.callback(self.cog, self.ctx)
 
-        self.loop.run_until_complete(self.cog.afk_command.callback(self.cog, ctx))
-
-        ctx.send.assert_called_once()
-        call_args = ctx.send.call_args
-        embed = call_args.kwargs.get("embed") or call_args.args[0]
+        embed = self._embed(self.ctx.send)
         self.assertIsInstance(embed, discord.Embed)
         self.assertIn("AFK", embed.title)
 
+    async def test_afk_list_empty(self):
+        with patch("afk.views.get_all_afk", return_value=[]):
+            await self.cog.afk_list_command.callback(self.cog, self.ctx)
 
-class TestAfkListCommand(unittest.TestCase):
-    def setUp(self):
-        self.loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(self.loop)
-        self.bot = MagicMock()
-        self.cog = AfkCog(self.bot)
-
-    def tearDown(self):
-        self.loop.close()
-
-    def test_afk_list_empty(self):
-        ctx = MagicMock()
-        ctx.send = AsyncMock()
-        ctx.guild = MagicMock()
-        ctx.guild.id = 123
-
-        with patch("afk.models.get_all_afk") as mock_get:
-            mock_get.return_value = []
-            self.loop.run_until_complete(self.cog.afk_list_command.callback(self.cog, ctx))
-
-        ctx.send.assert_called_once()
-        call_args = ctx.send.call_args
-        embed = call_args.kwargs.get("embed") or call_args.args[0]
+        embed = self._embed(self.ctx.send)
         self.assertIn("никого нет", embed.description.lower())
 
-    def test_afk_list_with_users(self):
-        ctx = MagicMock()
-        ctx.send = AsyncMock()
-        ctx.guild = MagicMock()
-        ctx.guild.id = 123
-        ctx.guild.get_member = MagicMock(return_value=None)
-
-        mock_rows = [
+    async def test_afk_list_with_users(self):
+        rows = [
             {
                 "user_id": 111,
                 "afk_reason": "test",
-                "afk_since": "2024-01-01T10:00:00",
+                "afk_since": clock.to_db(clock.shift(clock.utcnow(), hours=-1)),
                 "estimated_return": None,
-            },
+            }
         ]
 
-        with patch("afk.models.get_all_afk") as mock_get:
-            mock_get.return_value = mock_rows
-            self.loop.run_until_complete(self.cog.afk_list_command.callback(self.cog, ctx))
+        with patch("afk.views.get_all_afk", return_value=rows):
+            await self.cog.afk_list_command.callback(self.cog, self.ctx)
 
-        ctx.send.assert_called_once()
-        call_args = ctx.send.call_args
-        embed = call_args.kwargs.get("embed") or call_args.args[0]
+        embed = self._embed(self.ctx.send)
         self.assertEqual(embed.fields[0].value, "1 человек")
         self.assertIn("<@111>", embed.description)
 
+    async def test_afk_list_escapes_reason(self):
+        rows = [
+            {
+                "user_id": 111,
+                "afk_reason": "@everyone тревога",
+                "afk_since": clock.to_db(clock.utcnow()),
+                "estimated_return": None,
+            }
+        ]
 
-class TestAfkCheckCommand(unittest.TestCase):
-    def setUp(self):
-        self.loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(self.loop)
-        self.bot = MagicMock()
-        self.cog = AfkCog(self.bot)
+        with patch("afk.views.get_all_afk", return_value=rows):
+            await self.cog.afk_list_command.callback(self.cog, self.ctx)
 
-    def tearDown(self):
-        self.loop.close()
+        embed = self._embed(self.ctx.send)
+        self.assertNotIn("@everyone", embed.description)
 
-    def test_afk_check_not_afk(self):
-        ctx = MagicMock()
-        ctx.send = AsyncMock()
-        ctx.guild = MagicMock()
-        ctx.guild.id = 123
+    async def test_afk_check_not_afk(self):
+        member = FakeMember(user_id=456, name="TestUser")
 
-        member = MagicMock()
-        member.id = 456
-        member.display_name = "TestUser"
+        with patch("afk.commands.get_afk_user", return_value=None):
+            await self.cog.afk_check_command.callback(self.cog, self.ctx, member)
 
-        with patch("afk.commands.get_afk_user") as mock_get:
-            mock_get.return_value = None
-            self.loop.run_until_complete(self.cog.afk_check_command.callback(self.cog, ctx, member))
-
-        ctx.send.assert_called_once()
-        call_args = ctx.send.call_args
-        embed = call_args.kwargs.get("embed") or call_args.args[0]
+        embed = self._embed(self.ctx.send)
         self.assertIn("не в AFK", embed.description)
 
-    def test_afk_check_user_is_afk(self):
-        ctx = MagicMock()
-        ctx.send = AsyncMock()
-        ctx.guild = MagicMock()
-        ctx.guild.id = 123
-
-        member = MagicMock()
-        member.id = 456
-        member.display_name = "TestUser"
-
-        mock_row = {
-            "afk_since": "2024-01-01T10:00:00",
+    async def test_afk_check_user_is_afk(self):
+        member = FakeMember(user_id=456, name="TestUser")
+        row = {
+            "afk_since": clock.to_db(clock.shift(clock.utcnow(), hours=-2)),
             "afk_reason": "test reason",
+            "estimated_return": None,
         }
 
-        with patch("afk.commands.get_afk_user") as mock_get:
-            mock_get.return_value = mock_row
-            self.loop.run_until_complete(self.cog.afk_check_command.callback(self.cog, ctx, member))
+        with patch("afk.commands.get_afk_user", return_value=row):
+            await self.cog.afk_check_command.callback(self.cog, self.ctx, member)
 
-        ctx.send.assert_called_once()
-        call_args = ctx.send.call_args
-        embed = call_args.kwargs.get("embed") or call_args.args[0]
+        embed = self._embed(self.ctx.send)
         self.assertIn("В АФК", embed.fields[0].value)
 
+    async def test_afk_stats_no_data(self):
+        member = FakeMember(user_id=456, name="TestUser")
 
-class TestAfkStatsCommand(unittest.TestCase):
-    def setUp(self):
-        self.loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(self.loop)
-        self.bot = MagicMock()
-        self.cog = AfkCog(self.bot)
+        with patch("afk.commands.get_user_stats", return_value=None):
+            await self.cog.afk_stats_command.callback(self.cog, self.ctx, member)
 
-    def tearDown(self):
-        self.loop.close()
-
-    def test_afk_stats_no_data(self):
-        ctx = MagicMock()
-        ctx.send = AsyncMock()
-
-        member = MagicMock()
-        member.id = 456
-        member.display_name = "TestUser"
-
-        with patch("afk.commands.get_user_stats") as mock_get:
-            mock_get.return_value = None
-            self.loop.run_until_complete(self.cog.afk_stats_command.callback(self.cog, ctx, member))
-
-        ctx.send.assert_called_once()
-        call_args = ctx.send.call_args
-        embed = call_args.kwargs.get("embed") or call_args.args[0]
+        embed = self._embed(self.ctx.send)
         self.assertIn("TestUser", embed.title)
 
-    def test_afk_stats_with_data(self):
-        ctx = MagicMock()
-        ctx.send = AsyncMock()
-
-        member = MagicMock()
-        member.id = 456
-        member.display_name = "TestUser"
-
-        mock_stats = {
+    async def test_afk_stats_with_data(self):
+        member = FakeMember(user_id=456, name="TestUser")
+        stats = {
             "total_afk_count": 5,
             "total_afk_seconds": 3600,
             "longest_afk_seconds": 1800,
         }
 
-        with patch("afk.commands.get_user_stats") as mock_get:
-            mock_get.return_value = mock_stats
-            self.loop.run_until_complete(self.cog.afk_stats_command.callback(self.cog, ctx, member))
+        with patch("afk.commands.get_user_stats", return_value=stats):
+            await self.cog.afk_stats_command.callback(self.cog, self.ctx, member)
 
-        ctx.send.assert_called_once()
-        call_args = ctx.send.call_args
-        embed = call_args.kwargs.get("embed") or call_args.args[0]
+        embed = self._embed(self.ctx.send)
         self.assertIn("Статистика", embed.title)
 
 
-class TestAfkRemoveCommand(unittest.TestCase):
+class AfkRemoveCommandTestCase(unittest.IsolatedAsyncioTestCase):
     """Модераторская команда !afk_remove: принудительное снятие AFK."""
 
     def setUp(self):
-        self.loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(self.loop)
         self.bot = MagicMock()
         self.cog = AfkCog(self.bot)
-
+        self.guild = FakeGuild(guild_id=123)
         self.ctx = MagicMock()
         self.ctx.send = AsyncMock()
-        self.ctx.guild = MagicMock()
-        self.ctx.guild.id = 123
-        self.ctx.author.mention = "<@999>"
+        self.ctx.guild = self.guild
+        self.ctx.author = FakeMember(user_id=999, name="mod")
         self.ctx.author.roles = []
-
-        self.member = MagicMock()
-        self.member.id = 456
-        self.member.mention = "<@456>"
-
-    def tearDown(self):
-        self.loop.close()
+        self.member = FakeMember(user_id=456, name="target")
 
     def _set_permissions(self, **flags):
         defaults = {"administrator": False, "manage_guild": False, "manage_messages": False}
         defaults.update(flags)
         self.ctx.author.guild_permissions = SimpleNamespace(**defaults)
 
-    def test_moderator_removes_afk(self):
+    @staticmethod
+    def _session(**overrides):
+        session = {
+            "user_id": 456,
+            "duration_seconds": 3600,
+            "original_nick": "Вася",
+            "nick_applied": 1,
+        }
+        session.update(overrides)
+        return session
+
+    async def test_moderator_removes_afk(self):
         self._set_permissions(manage_messages=True)
 
-        with patch("afk.commands.get_afk_user", return_value=None):
-            with patch("afk.commands.remove_afk", return_value=3600) as mock_remove:
-                with patch("afk.commands.remove_afk_nickname", new_callable=AsyncMock):
-                    with patch("afk.commands.send_to_log", new_callable=AsyncMock) as mock_log:
-                        self.loop.run_until_complete(
-                            self.cog.afk_remove_command.callback(self.cog, self.ctx, self.member)
-                        )
+        with patch("afk.commands.take_afk_session", return_value=self._session()) as mock_take:
+            with patch("afk.commands.remove_afk_nickname", new_callable=AsyncMock) as mock_nick:
+                with patch("afk.commands.send_to_log", new_callable=AsyncMock) as mock_log:
+                    await self.cog.afk_remove_command.callback(self.cog, self.ctx, self.member)
 
-        mock_remove.assert_called_once_with(456, 123)
-        mock_log.assert_called_once()
-        self.ctx.send.assert_called_once()
+        mock_take.assert_called_once_with(456, 123)
+        mock_nick.assert_awaited_once_with(self.member, "Вася", nick_applied=True)
+        mock_log.assert_awaited_once()
+        self.ctx.send.assert_awaited_once()
 
-    def test_member_without_afk(self):
+    async def test_member_without_afk(self):
         self._set_permissions(manage_messages=True)
 
-        with patch("afk.commands.get_afk_user", return_value=None):
-            with patch("afk.commands.remove_afk") as mock_remove:
-                mock_remove.return_value = None
-                self.loop.run_until_complete(
-                    self.cog.afk_remove_command.callback(self.cog, self.ctx, self.member)
-                )
+        with patch("afk.commands.take_afk_session", return_value=None) as mock_take:
+            with patch("afk.commands.send_to_log", new_callable=AsyncMock) as mock_log:
+                await self.cog.afk_remove_command.callback(self.cog, self.ctx, self.member)
 
-        mock_remove.assert_called_once_with(456, 123)
-        self.ctx.send.assert_called_once()
+        mock_take.assert_called_once_with(456, 123)
+        mock_log.assert_not_awaited()
+        self.assertIn(config.AFK_CHECKED_NOT_AFK, self.ctx.send.await_args.args[0])
 
-    def test_regular_member_denied(self):
+    async def test_regular_member_denied(self):
         self._set_permissions()
 
-        with patch("afk.commands.remove_afk") as mock_remove:
-            self.loop.run_until_complete(
-                self.cog.afk_remove_command.callback(self.cog, self.ctx, self.member)
-            )
+        with patch("afk.commands.take_afk_session") as mock_take:
+            await self.cog.afk_remove_command.callback(self.cog, self.ctx, self.member)
 
-        mock_remove.assert_not_called()
-        self.ctx.send.assert_called_once()
+        mock_take.assert_not_called()
+        self.assertIn(config.AFK_NO_PERMISSION, self.ctx.send.await_args.args[0])
 
-    def test_staff_role_grants_access(self):
+    async def test_staff_role_grants_access(self):
         self._set_permissions()
         role = MagicMock()
         role.id = 777
         self.ctx.author.roles = [role]
 
-        # is_staff читает config.STAFF_ROLE_IDS через utils.permissions
         with patch("utils.permissions.config.STAFF_ROLE_IDS", [777]):
-            with patch("afk.commands.get_afk_user", return_value=None):
-                with patch("afk.commands.remove_afk", return_value=60) as mock_remove:
-                    with patch("afk.commands.remove_afk_nickname", new_callable=AsyncMock):
-                        with patch("afk.commands.send_to_log", new_callable=AsyncMock):
-                            self.loop.run_until_complete(
-                                self.cog.afk_remove_command.callback(
-                                    self.cog, self.ctx, self.member
-                                )
-                            )
+            with patch("afk.commands.take_afk_session", return_value=self._session()) as mock_take:
+                with patch("afk.commands.remove_afk_nickname", new_callable=AsyncMock):
+                    with patch("afk.commands.send_to_log", new_callable=AsyncMock):
+                        await self.cog.afk_remove_command.callback(self.cog, self.ctx, self.member)
 
-        mock_remove.assert_called_once_with(456, 123)
+        mock_take.assert_called_once_with(456, 123)
+
+    async def test_nickname_not_restored_when_not_applied(self):
+        self._set_permissions(manage_messages=True)
+        session = self._session(nick_applied=0, original_nick=None)
+
+        with patch("afk.commands.take_afk_session", return_value=session):
+            with patch("afk.commands.remove_afk_nickname", new_callable=AsyncMock) as mock_nick:
+                with patch("afk.commands.send_to_log", new_callable=AsyncMock):
+                    await self.cog.afk_remove_command.callback(self.cog, self.ctx, self.member)
+
+        mock_nick.assert_awaited_once_with(self.member, None, nick_applied=False)
 
 
 if __name__ == "__main__":

@@ -1,161 +1,395 @@
-import json
-from datetime import datetime
+"""Данные заявок: тикеты и дневная статистика.
 
-from .db import get_db
-from .migrations import migrate_schema
+Жизненный цикл заявки (issues #2, #3):
+
+```
+            create_ticket()                begin_transition()      finalize_transition()
+   (нет) ──────────────────► open ─────────────────────────► processing ─────────────────► accepted
+                              │                                  │                          denied
+                              │                                  └── release_transition() ──► open
+                              └────────────── reconciliation ───────────────────────────────► closed
+```
+
+- `open` — заявка активна, канал существует;
+- `processing` — терминальное действие началось: Discord-операции ещё идут,
+  но тикет уже захвачен ровно одним обработчиком (защита от double-click
+  и гонки accept/deny/close);
+- `accepted` / `denied` / `closed` — конечные состояния, изменению не подлежат.
+
+Все переходы — условные UPDATE внутри одной транзакции: побеждает ровно
+одна операция, повторные возвращают признак «уже обработано». Записи с
+зависшим `processing` подбирает reconciliation (`tickets/reconcile.py`).
+"""
+
+from __future__ import annotations
+
+import json
+import sqlite3
+from typing import Any
+
+from utils import clock
+
+from . import db
+from .schema import (
+    ACTIVE_STATUSES,
+    STATUS_CLOSED,
+    STATUS_OPEN,
+    STATUS_PROCESSING,
+    TERMINAL_STATUSES,
+)
 
 ANONYMIZED_USER_ID = 0
 ANONYMIZED_USER_NAME = "deleted-user"
 
+_ACTIVE_SQL = ", ".join("?" for _ in ACTIVE_STATUSES)
 
-def init_db():
+
+def init_db() -> None:
+    from .migrations import migrate_schema
+
     migrate_schema()
 
 
+# ---------------------------------------------------------------------------
+# Создание и чтение
+# ---------------------------------------------------------------------------
+
+
 def save_ticket(
-    channel_id,
-    user_id,
-    user_name,
-    topic,
-    ticket_type,
-    answers,
-    created_at,
-    guild_id=0,
-):
-    conn = get_db()
-    try:
-        c = conn.cursor()
-        c.execute(
+    channel_id: int,
+    user_id: int,
+    user_name: str | None,
+    topic: str,
+    ticket_type: str | None,
+    answers: str | None,
+    created_at: str | None = None,
+    guild_id: int = 0,
+) -> int:
+    """Создаёт запись заявки и возвращает её id.
+
+    Конфликт уникального индекса (у пользователя уже есть активная заявка,
+    либо канал уже зарегистрирован) поднимает ``sqlite3.IntegrityError`` —
+    вызывающий код обязан убрать за собой созданный канал.
+    """
+    stamp = created_at or clock.to_db()
+
+    def operation(conn: sqlite3.Connection) -> int:
+        cursor = conn.execute(
             """
             INSERT INTO tickets
-            (guild_id, channel_id, user_id, user_name, topic, type, answers, created_at, status)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'open')
-        """,
-            (guild_id, channel_id, user_id, user_name, topic, ticket_type, answers, created_at),
+                (guild_id, channel_id, user_id, user_name, topic, type, answers,
+                 created_at, status)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                guild_id,
+                channel_id,
+                user_id,
+                user_name,
+                topic,
+                ticket_type,
+                answers,
+                stamp,
+                STATUS_OPEN,
+            ),
         )
-        conn.commit()
-    finally:
-        conn.close()
+        return int(cursor.lastrowid)
+
+    return db.run(operation, write=True)
 
 
-def get_ticket(channel_id):
-    conn = get_db()
-    try:
-        c = conn.cursor()
-        c.execute("SELECT * FROM tickets WHERE channel_id = ?", (channel_id,))
-        return c.fetchone()
-    finally:
-        conn.close()
+def get_ticket(channel_id: int) -> sqlite3.Row | None:
+    return db.run(
+        lambda conn: conn.execute(
+            "SELECT * FROM tickets WHERE channel_id = ?", (channel_id,)
+        ).fetchone()
+    )
 
 
-def get_open_ticket_for_user(guild_id, user_id):
-    conn = get_db()
-    try:
-        c = conn.cursor()
-        c.execute(
-            """
+def get_ticket_by_id(ticket_id: int) -> sqlite3.Row | None:
+    return db.run(
+        lambda conn: conn.execute("SELECT * FROM tickets WHERE id = ?", (ticket_id,)).fetchone()
+    )
+
+
+def get_open_ticket_for_user(guild_id: int, user_id: int) -> sqlite3.Row | None:
+    """Активная (open или processing) заявка пользователя на сервере."""
+    return db.run(
+        lambda conn: conn.execute(
+            f"""
             SELECT * FROM tickets
-            WHERE guild_id = ? AND user_id = ? AND status = 'open'
+            WHERE guild_id = ? AND user_id = ? AND status IN ({_ACTIVE_SQL})
             ORDER BY created_at DESC, id DESC
             LIMIT 1
             """,
-            (guild_id, user_id),
-        )
-        return c.fetchone()
-    finally:
-        conn.close()
-
-
-def delete_ticket(channel_id):
-    conn = get_db()
-    try:
-        c = conn.cursor()
-        c.execute("DELETE FROM tickets WHERE channel_id = ?", (channel_id,))
-        conn.commit()
-    finally:
-        conn.close()
-
-
-def update_ticket_status(channel_id, status, closed_by=None, reason=None):
-    """Переводит открытый тикет в новый статус.
-
-    Возвращает True, если тикет был открыт и обновлён; False — если тикета
-    нет или он уже обработан (повторное нажатие статистику не портит).
-    Статистика пополняется только реальными решениями (accepted/denied).
-    """
-    conn = get_db()
-    try:
-        c = conn.cursor()
-        now = datetime.now()
-        ticket = c.execute(
-            "SELECT guild_id FROM tickets WHERE channel_id = ? AND status = 'open'",
-            (channel_id,),
+            (guild_id, user_id, *ACTIVE_STATUSES),
         ).fetchone()
-        if not ticket:
-            return False
-        guild_id = ticket["guild_id"]
+    )
 
-        c.execute(
+
+def get_active_tickets(guild_id: int | None = None) -> list[sqlite3.Row]:
+    """Активные заявки — вход для reconciliation-задачи."""
+
+    def operation(conn: sqlite3.Connection) -> list[sqlite3.Row]:
+        if guild_id is None:
+            return conn.execute(
+                f"SELECT * FROM tickets WHERE status IN ({_ACTIVE_SQL}) ORDER BY id",
+                ACTIVE_STATUSES,
+            ).fetchall()
+        return conn.execute(
+            f"SELECT * FROM tickets WHERE guild_id = ? AND status IN ({_ACTIVE_SQL}) ORDER BY id",
+            (guild_id, *ACTIVE_STATUSES),
+        ).fetchall()
+
+    return db.run(operation)
+
+
+def get_stale_processing(older_than_iso: str) -> list[sqlite3.Row]:
+    """Заявки, застрявшие в processing дольше допустимого."""
+    return db.run(
+        lambda conn: conn.execute(
             """
+            SELECT * FROM tickets
+            WHERE status = ? AND (processing_at IS NULL OR processing_at < ?)
+            ORDER BY id
+            """,
+            (STATUS_PROCESSING, older_than_iso),
+        ).fetchall()
+    )
+
+
+def get_all_tickets(limit: int = 50, guild_id: int = 0) -> list[sqlite3.Row]:
+    return db.run(
+        lambda conn: conn.execute(
+            """
+            SELECT * FROM tickets
+            WHERE guild_id = ?
+            ORDER BY created_at DESC, id DESC
+            LIMIT ?
+            """,
+            (guild_id, limit),
+        ).fetchall()
+    )
+
+
+def get_user_tickets(guild_id: int, user_id: int) -> list[sqlite3.Row]:
+    """Все тикеты пользователя на сервере (для удаления данных)."""
+    return db.run(
+        lambda conn: conn.execute(
+            "SELECT * FROM tickets WHERE guild_id = ? AND user_id = ? ORDER BY id",
+            (guild_id, user_id),
+        ).fetchall()
+    )
+
+
+# ---------------------------------------------------------------------------
+# Переходы состояний
+# ---------------------------------------------------------------------------
+
+
+def begin_transition(channel_id: int, target_status: str, guild_id: int | None = None) -> bool:
+    """Захватывает открытый тикет: `open -> processing`.
+
+    True — захват удался и вызывающий владеет терминальным действием.
+    False — тикета нет, он принадлежит другому серверу или уже обработан
+    (повторное нажатие, конкурирующее accept/deny/close).
+    """
+    if target_status not in TERMINAL_STATUSES:
+        raise ValueError(f"недопустимый целевой статус заявки: {target_status}")
+
+    def operation(conn: sqlite3.Connection) -> bool:
+        params: list[Any] = [STATUS_PROCESSING, target_status, clock.to_db(), channel_id]
+        guild_clause = ""
+        if guild_id is not None:
+            guild_clause = " AND guild_id = ?"
+            params.append(guild_id)
+        cursor = conn.execute(
+            f"""
             UPDATE tickets
-            SET status = ?, closed_at = ?, closed_by = ?, reason = ?
-            WHERE channel_id = ? AND status = 'open'
-        """,
-            (status, now.isoformat(), closed_by, reason, channel_id),
+            SET status = ?, pending_status = ?, processing_at = ?
+            WHERE channel_id = ? AND status = '{STATUS_OPEN}'{guild_clause}
+            """,
+            params,
         )
-        if c.rowcount == 0:
+        return cursor.rowcount > 0
+
+    return db.run(operation, write=True)
+
+
+def release_transition(channel_id: int) -> bool:
+    """Возвращает захваченный тикет в `open` (временная ошибка Discord)."""
+
+    def operation(conn: sqlite3.Connection) -> bool:
+        cursor = conn.execute(
+            f"""
+            UPDATE tickets
+            SET status = '{STATUS_OPEN}', pending_status = NULL, processing_at = NULL
+            WHERE channel_id = ? AND status = '{STATUS_PROCESSING}'
+            """,
+            (channel_id,),
+        )
+        return cursor.rowcount > 0
+
+    return db.run(operation, write=True)
+
+
+def finalize_transition(
+    channel_id: int,
+    status: str,
+    closed_by: int | None = None,
+    reason: str | None = None,
+) -> bool:
+    """Фиксирует конечное состояние захваченного тикета.
+
+    Дневная статистика пополняется ровно один раз — в той же транзакции,
+    что и смена статуса, и только реальными решениями (accepted/denied).
+    """
+    if status not in TERMINAL_STATUSES:
+        raise ValueError(f"недопустимый конечный статус заявки: {status}")
+
+    def operation(conn: sqlite3.Connection) -> bool:
+        now = clock.utcnow()
+        # финализировать можно только то намерение, которое было захвачено:
+        # иначе параллельное accept могло бы «дофинализировать» чужой claim
+        row = conn.execute(
+            f"""
+            SELECT guild_id FROM tickets
+            WHERE channel_id = ? AND status = '{STATUS_PROCESSING}'
+              AND pending_status = ?
+            """,
+            (channel_id, status),
+        ).fetchone()
+        if row is None:
+            return False
+
+        cursor = conn.execute(
+            f"""
+            UPDATE tickets
+            SET status = ?, closed_at = ?, closed_by = ?, reason = ?,
+                pending_status = NULL, processing_at = NULL
+            WHERE channel_id = ? AND status = '{STATUS_PROCESSING}'
+              AND pending_status = ?
+            """,
+            (status, clock.to_db(now), closed_by, reason, channel_id, status),
+        )
+        if cursor.rowcount == 0:
             return False
 
         if status in ("accepted", "denied"):
-            date = now.strftime("%Y-%m-%d")
-            accepted = 1 if status == "accepted" else 0
-            denied = 1 if status == "denied" else 0
-
-            c.execute(
-                """
-                INSERT INTO stats (guild_id, date, total_applications, accepted, denied)
-                VALUES (?, ?, 1, ?, ?)
-                ON CONFLICT(guild_id, date) DO UPDATE SET
-                    total_applications = total_applications + 1,
-                    accepted = accepted + excluded.accepted,
-                    denied = denied + excluded.denied
-                """,
-                (guild_id, date, accepted, denied),
-            )
-
-        conn.commit()
+            _bump_daily_stats(conn, row["guild_id"], status, now)
         return True
-    finally:
-        conn.close()
+
+    return db.run(operation, write=True)
 
 
-def get_stats(guild_id=0):
-    conn = get_db()
-    try:
-        c = conn.cursor()
+def _bump_daily_stats(conn: sqlite3.Connection, guild_id: int, status: str, now) -> None:
+    conn.execute(
+        """
+        INSERT INTO stats (guild_id, date, total_applications, accepted, denied)
+        VALUES (?, ?, 1, ?, ?)
+        ON CONFLICT(guild_id, date) DO UPDATE SET
+            total_applications = total_applications + 1,
+            accepted = accepted + excluded.accepted,
+            denied = denied + excluded.denied
+        """,
+        (
+            guild_id,
+            clock.local_date(now),
+            1 if status == "accepted" else 0,
+            1 if status == "denied" else 0,
+        ),
+    )
 
-        c.execute("SELECT COUNT(*) FROM tickets WHERE guild_id = ?", (guild_id,))
-        total = c.fetchone()[0] or 0
 
-        c.execute(
-            "SELECT COUNT(*) FROM tickets WHERE guild_id = ? AND status = 'accepted'",
-            (guild_id,),
+def update_ticket_status(
+    channel_id: int,
+    status: str,
+    closed_by: int | None = None,
+    reason: str | None = None,
+    guild_id: int | None = None,
+) -> bool:
+    """Атомарный переход активной заявки сразу в конечное состояние.
+
+    Используется там, где нет промежуточных Discord-операций (например
+    reconciliation). Возвращает False, если заявка уже обработана.
+    """
+    if status not in TERMINAL_STATUSES:
+        raise ValueError(f"недопустимый конечный статус заявки: {status}")
+
+    def operation(conn: sqlite3.Connection) -> bool:
+        now = clock.utcnow()
+        params: list[Any] = [channel_id, *ACTIVE_STATUSES]
+        guild_clause = ""
+        if guild_id is not None:
+            guild_clause = " AND guild_id = ?"
+            params.append(guild_id)
+        row = conn.execute(
+            f"""
+            SELECT guild_id FROM tickets
+            WHERE channel_id = ? AND status IN ({_ACTIVE_SQL}){guild_clause}
+            """,
+            params,
+        ).fetchone()
+        if row is None:
+            return False
+
+        cursor = conn.execute(
+            f"""
+            UPDATE tickets
+            SET status = ?, closed_at = ?, closed_by = ?, reason = ?,
+                pending_status = NULL, processing_at = NULL
+            WHERE channel_id = ? AND status IN ({_ACTIVE_SQL})
+            """,
+            (status, clock.to_db(now), closed_by, reason, channel_id, *ACTIVE_STATUSES),
         )
-        accepted = c.fetchone()[0] or 0
+        if cursor.rowcount == 0:
+            return False
 
-        c.execute(
-            "SELECT COUNT(*) FROM tickets WHERE guild_id = ? AND status = 'denied'",
+        if status in ("accepted", "denied"):
+            _bump_daily_stats(conn, row["guild_id"], status, now)
+        return True
+
+    return db.run(operation, write=True)
+
+
+def delete_ticket(channel_id: int) -> bool:
+    def operation(conn: sqlite3.Connection) -> bool:
+        cursor = conn.execute("DELETE FROM tickets WHERE channel_id = ?", (channel_id,))
+        return cursor.rowcount > 0
+
+    return db.run(operation, write=True)
+
+
+def delete_ticket_by_id(ticket_id: int) -> bool:
+    """Полностью удаляет запись тикета (используется ретенцией)."""
+
+    def operation(conn: sqlite3.Connection) -> bool:
+        cursor = conn.execute("DELETE FROM tickets WHERE id = ?", (ticket_id,))
+        return cursor.rowcount > 0
+
+    return db.run(operation, write=True)
+
+
+# ---------------------------------------------------------------------------
+# Статистика, связи с лог-центром, приватность
+# ---------------------------------------------------------------------------
+
+
+def get_stats(guild_id: int = 0) -> dict[str, Any]:
+    def operation(conn: sqlite3.Connection) -> dict[str, Any]:
+        counters = conn.execute(
+            """
+            SELECT
+                COUNT(*) AS total,
+                SUM(status = 'accepted') AS accepted,
+                SUM(status = 'denied') AS denied,
+                SUM(status IN ('open', 'processing')) AS open_count
+            FROM tickets
+            WHERE guild_id = ?
+            """,
             (guild_id,),
-        )
-        denied = c.fetchone()[0] or 0
-
-        c.execute(
-            "SELECT COUNT(*) FROM tickets WHERE guild_id = ? AND status = 'open'",
-            (guild_id,),
-        )
-        open_count = c.fetchone()[0] or 0
-
-        c.execute(
+        ).fetchone()
+        weekly = conn.execute(
             """
             SELECT date, total_applications, accepted, denied
             FROM stats
@@ -164,85 +398,44 @@ def get_stats(guild_id=0):
             LIMIT 7
             """,
             (guild_id,),
-        )
-        weekly = c.fetchall()
-
+        ).fetchall()
         return {
-            "total": total,
-            "accepted": accepted,
-            "denied": denied,
-            "open": open_count,
+            "total": counters["total"] or 0,
+            "accepted": counters["accepted"] or 0,
+            "denied": counters["denied"] or 0,
+            "open": counters["open_count"] or 0,
             "weekly": weekly,
         }
-    finally:
-        conn.close()
+
+    return db.run(operation)
 
 
-def get_all_tickets(limit=50, guild_id=0):
-    conn = get_db()
-    try:
-        c = conn.cursor()
-        c.execute(
-            """
-            SELECT * FROM tickets
-            WHERE guild_id = ?
-            ORDER BY created_at DESC
-            LIMIT ?
-        """,
-            (guild_id, limit),
-        )
-        return c.fetchall()
-    finally:
-        conn.close()
-
-
-def get_user_tickets(guild_id, user_id):
-    """Все тикеты пользователя на сервере (для удаления данных)."""
-    conn = get_db()
-    try:
-        c = conn.cursor()
-        c.execute(
-            """
-            SELECT * FROM tickets
-            WHERE guild_id = ? AND user_id = ?
-            ORDER BY id
-            """,
-            (guild_id, user_id),
-        )
-        return c.fetchall()
-    finally:
-        conn.close()
-
-
-def add_log_message_id(channel_id, thread_id, message_id):
+def add_log_message_id(channel_id: int, thread_id: int, message_id: int) -> bool:
     """Запоминает сообщение лог-центра, связанное с тикетом.
 
     Хранится JSON-массив пар [thread_id, message_id] — по ним удаление
-    персональных данных и ретенция находят и стирают логовые вложения
-    (транскрипты) в Discord.
+    персональных данных и ретенция находят и стирают логовые вложения.
     """
-    conn = get_db()
-    try:
-        c = conn.cursor()
-        row = c.execute(
+
+    def operation(conn: sqlite3.Connection) -> bool:
+        row = conn.execute(
             "SELECT log_message_ids FROM tickets WHERE channel_id = ?",
             (channel_id,),
         ).fetchone()
-        if not row:
+        if row is None:
             return False
-        refs = parse_log_message_refs(row["log_message_ids"])
+        refs = [list(ref) for ref in parse_log_message_refs(row["log_message_ids"])]
         refs.append([int(thread_id), int(message_id)])
-        c.execute(
+        cursor = conn.execute(
             "UPDATE tickets SET log_message_ids = ? WHERE channel_id = ?",
             (json.dumps(refs), channel_id),
         )
-        conn.commit()
-        return c.rowcount > 0
-    finally:
-        conn.close()
+        return cursor.rowcount > 0
+
+    return db.run(operation, write=True)
 
 
-def parse_log_message_refs(raw):
+def parse_log_message_refs(raw: str | None) -> list[tuple[int, int]]:
     """JSON из tickets.log_message_ids -> список пар (thread_id, message_id)."""
     if not raw:
         return []
@@ -250,7 +443,9 @@ def parse_log_message_refs(raw):
         data = json.loads(raw)
     except (TypeError, ValueError):
         return []
-    refs = []
+    if not isinstance(data, list):
+        return []
+    refs: list[tuple[int, int]] = []
     for item in data:
         try:
             thread_id, message_id = item
@@ -260,28 +455,32 @@ def parse_log_message_refs(raw):
     return refs
 
 
-def anonymize_user_tickets(guild_id, user_id):
+def anonymize_user_tickets(guild_id: int, user_id: int) -> int:
     """Удаляет персональные поля пользователя из тикетов сервера.
 
     Ответы формы, имя и ID заявителя стираются, связи с сообщениями
-    лог-центра очищаются (сами сообщения удаляет вызывающий код), открытые
+    лог-центра очищаются (сами сообщения удаляет вызывающий код), активные
     тикеты переводятся в закрытые: их каналы на этом шаге уже удалены.
-    Агрегированная статистика остаётся: она не содержит персональных данных.
+    Агрегированная статистика остаётся: персональных данных в ней нет.
     """
-    conn = get_db()
-    try:
-        c = conn.cursor()
-        c.execute(
-            """
+
+    def operation(conn: sqlite3.Connection) -> int:
+        cursor = conn.execute(
+            f"""
             UPDATE tickets
             SET user_id = ?,
                 user_name = ?,
-                answers = '{}',
+                answers = '{{}}',
                 reason = NULL,
                 log_message_ids = NULL,
-                status = CASE WHEN status = 'open' THEN 'closed' ELSE status END,
+                pending_status = NULL,
+                processing_at = NULL,
+                status = CASE
+                    WHEN status IN ({_ACTIVE_SQL}) THEN '{STATUS_CLOSED}'
+                    ELSE status
+                END,
                 closed_at = CASE
-                    WHEN status = 'open' AND closed_at IS NULL THEN ?
+                    WHEN status IN ({_ACTIVE_SQL}) AND closed_at IS NULL THEN ?
                     ELSE closed_at
                 END
             WHERE guild_id = ? AND user_id = ?
@@ -289,48 +488,31 @@ def anonymize_user_tickets(guild_id, user_id):
             (
                 ANONYMIZED_USER_ID,
                 ANONYMIZED_USER_NAME,
-                datetime.now().isoformat(),
+                *ACTIVE_STATUSES,
+                *ACTIVE_STATUSES,
+                clock.to_db(),
                 guild_id,
                 user_id,
             ),
         )
-        changed = c.rowcount
-        conn.commit()
-        return changed
-    finally:
-        conn.close()
+        return cursor.rowcount
+
+    return db.run(operation, write=True)
 
 
-def get_retention_expired(cutoff_iso):
+def get_retention_expired(cutoff_iso: str) -> list[sqlite3.Row]:
     """Тикеты старше срока хранения.
 
-    Закрытые — по дате закрытия, открытые (заброшенные) — по дате создания.
+    Конечные — по дате закрытия, активные (заброшенные) — по дате создания.
     """
-    conn = get_db()
-    try:
-        c = conn.cursor()
-        c.execute(
-            """
+    return db.run(
+        lambda conn: conn.execute(
+            f"""
             SELECT * FROM tickets
-            WHERE (status != 'open' AND closed_at IS NOT NULL AND closed_at < ?)
-               OR (status = 'open' AND created_at < ?)
+            WHERE (status NOT IN ({_ACTIVE_SQL}) AND closed_at IS NOT NULL AND closed_at < ?)
+               OR (status IN ({_ACTIVE_SQL}) AND created_at < ?)
             ORDER BY id
             """,
-            (cutoff_iso, cutoff_iso),
-        )
-        return c.fetchall()
-    finally:
-        conn.close()
-
-
-def delete_ticket_by_id(ticket_id):
-    """Полностью удаляет запись тикета (используется ретенцией)."""
-    conn = get_db()
-    try:
-        c = conn.cursor()
-        c.execute("DELETE FROM tickets WHERE id = ?", (ticket_id,))
-        deleted = c.rowcount > 0
-        conn.commit()
-        return deleted
-    finally:
-        conn.close()
+            (*ACTIVE_STATUSES, cutoff_iso, *ACTIVE_STATUSES, cutoff_iso),
+        ).fetchall()
+    )
