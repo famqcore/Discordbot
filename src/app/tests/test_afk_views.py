@@ -303,8 +303,9 @@ class TestAfkReturnViewButtons(unittest.IsolatedAsyncioTestCase):
         with patch("afk.models.get_afk_user", return_value=None):
             with patch("afk.models.remove_afk") as mock_remove:
                 with patch("afk.models.remove_afk_nickname"):
-                    mock_remove.return_value = 3600
-                    await view.confirm.callback(interaction)
+                    with patch("afk.views.send_to_log", new_callable=AsyncMock):
+                        mock_remove.return_value = 3600
+                        await view.confirm.callback(interaction)
 
         interaction.response.edit_message.assert_called_once()
 
@@ -412,7 +413,8 @@ class TestAfkSetModalSubmit(unittest.IsolatedAsyncioTestCase):
 
         with patch("afk.models.set_afk") as mock_set:
             with patch("afk.models.add_afk_nickname"):
-                await modal.on_submit(interaction)
+                with patch("afk.views.send_to_log", new_callable=AsyncMock):
+                    await modal.on_submit(interaction)
 
         interaction.response.send_message.assert_called_once()
         mock_set.assert_called_once()
@@ -433,7 +435,8 @@ class TestAfkSetModalSubmit(unittest.IsolatedAsyncioTestCase):
 
         with patch("afk.models.set_afk") as mock_set:
             with patch("afk.models.add_afk_nickname"):
-                await modal.on_submit(interaction)
+                with patch("afk.views.send_to_log", new_callable=AsyncMock):
+                    await modal.on_submit(interaction)
 
         call_args = mock_set.call_args
         self.assertEqual(call_args.args[2], config.AFK_REASON_DEFAULT)

@@ -5,6 +5,7 @@ import discord
 
 import config
 from utils.logcenter import LOG_KEY_AFK, send_to_log
+from utils.mentions import escape_user_text, mentions_for
 from utils.ratelimit import retry_after
 
 
@@ -166,8 +167,10 @@ class AfkSetModal(discord.ui.Modal, title=config.AFK_MODAL_TITLE):
         set_afk(self.member.id, self.guild_id, reason, estimated_return, self.member.nick)
         await add_afk_nickname(self.member)
         await interaction.response.send_message(
-            f"🔴 Вы в AFK.\nПричина: {reason}\nВернётесь: <t:{int(parsed.timestamp())}:R>",
+            f"🔴 Вы в AFK.\nПричина: {escape_user_text(reason)}\n"
+            f"Вернётесь: <t:{int(parsed.timestamp())}:R>",
             ephemeral=True,
+            allowed_mentions=mentions_for(),
         )
 
         if self.guild is not None:

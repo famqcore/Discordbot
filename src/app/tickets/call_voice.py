@@ -3,6 +3,7 @@ import discord
 import config
 from database.tickets_db import get_ticket
 from utils.logcenter import LOG_KEY_CALLS, send_to_log
+from utils.mentions import mentions_for
 from utils.permissions import is_staff
 from utils.resolve import get_voice_channel
 
@@ -53,11 +54,15 @@ class VoiceSelectView(discord.ui.View):
                 )
                 return
 
+            # пинг по делу — только заявителю, рекрутёр нажал кнопку сам
             await self.ticket_channel.send(
-                f"**Рекрут** {recruiter.mention} **вызвал** {applicant.mention if applicant else 'заявителя'} **на обзвон**"
+                f"**Рекрут** {recruiter.mention} **вызвал** "
+                f"{applicant.mention if applicant else 'заявителя'} **на обзвон**",
+                allowed_mentions=mentions_for(users=[applicant] if applicant else []),
             )
             await self.ticket_channel.send(
-                f"{applicant.mention if applicant else 'Заявитель'} зайдите в {voice_ch.mention}"
+                f"{applicant.mention if applicant else 'Заявитель'} зайдите в {voice_ch.mention}",
+                allowed_mentions=mentions_for(users=[applicant] if applicant else []),
             )
             await interaction.response.send_message(
                 f"Вызов отправлен в {voice_ch.mention}", ephemeral=True

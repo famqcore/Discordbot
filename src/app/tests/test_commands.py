@@ -109,24 +109,31 @@ class TestDeleteUserDataCommand(unittest.TestCase):
     def tearDown(self):
         self.loop.close()
 
-    def test_delete_user_data_calls_storage_helpers(self):
+    def test_delete_user_data_asks_confirmation_first(self):
+        from tickets.commands import DeleteUserDataConfirmView
+
         ctx = MagicMock()
         ctx.guild.id = 456
+        ctx.author.id = 777
         ctx.send = AsyncMock()
         member = MagicMock()
         member.id = 123
+        member.mention = "<@123>"
 
-        with patch("tickets.commands.anonymize_user_tickets", return_value=2) as mock_tickets:
-            with patch("tickets.commands.delete_afk_user_data") as mock_afk:
-                mock_afk.return_value = {"afk_users": 1, "afk_stats": 1, "afk_cooldown": 3}
-                self.loop.run_until_complete(
-                    self.cog.delete_user_data.callback(self.cog, ctx, member)
-                )
+        with patch("tickets.commands.erase_user_data", new_callable=AsyncMock) as mock_erase:
+            self.loop.run_until_complete(self.cog.delete_user_data.callback(self.cog, ctx, member))
 
-        mock_tickets.assert_called_once_with(456, 123)
-        mock_afk.assert_called_once_with(123, 456)
+        # без подтверждения ничего не удаляется
+        mock_erase.assert_not_called()
         ctx.send.assert_called_once()
-        self.assertIn("тикеты анонимизированы", ctx.send.call_args.args[0])
+        view = ctx.send.call_args.kwargs["view"]
+        self.assertIsInstance(view, DeleteUserDataConfirmView)
+        self.assertEqual(view.admin_id, 777)
+        self.assertIs(view.member, member)
+        # подтверждение не пингует субъекта данных
+        allowed = ctx.send.call_args.kwargs["allowed_mentions"]
+        self.assertEqual(allowed.users, [])
+        self.assertIn("Удалить персональные данные", ctx.send.call_args.args[0])
 
 
 class TestHistoryCommand(unittest.TestCase):

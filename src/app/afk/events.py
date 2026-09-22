@@ -4,6 +4,7 @@ import discord
 from discord.ext import commands
 
 import config
+from utils.mentions import escape_user_text, mentions_for
 
 from .models import (
     check_and_reply,
@@ -38,11 +39,17 @@ def setup_afk_events(bot: commands.Bot):
 
                 afk_since = datetime.fromisoformat(row["afk_since"])
                 duration = format_duration(int((datetime.now() - afk_since).total_seconds()))
+                # причина — пользовательский ввод: экранируем, чтобы из неё
+                # нельзя было сделать массовый пинг через бота
                 reply = config.AFK_AUTO_REPLY.format(
                     mention=entity.mention,
-                    reason=row.get("afk_reason") or "Отошёл",
+                    reason=escape_user_text(row.get("afk_reason") or "Отошёл"),
                     duration=duration,
                 )
-                await message.channel.send(reply, delete_after=60)
+                await message.channel.send(
+                    reply,
+                    delete_after=60,
+                    allowed_mentions=mentions_for(users=[entity]),
+                )
 
         await bot.process_commands(message)

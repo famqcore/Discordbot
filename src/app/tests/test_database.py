@@ -259,5 +259,156 @@ class TestDatabaseMigrations(unittest.TestCase):
                 pass
 
 
+class TestMigrationV3ErasureSupport(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
+        self.temp.close()
+        self._old_db_path = config.DB_PATH
+        config.DB_PATH = self.temp.name
+        importlib.reload(db_module)
+        importlib.reload(tickets_module)
+        self.db = tickets_module
+        self.db.init_db()
+
+    def tearDown(self):
+        config.DB_PATH = self._old_db_path
+        try:
+            os.unlink(self.temp.name)
+        except OSError:
+            pass
+
+    def test_tickets_has_log_message_ids_column(self):
+        conn = db_module.get_db()
+        cols = {row["name"] for row in conn.execute("PRAGMA table_info(tickets)")}
+        version = conn.execute("PRAGMA user_version").fetchone()[0]
+        conn.close()
+        self.assertIn("log_message_ids", cols)
+        self.assertGreaterEqual(version, 3)
+
+    def test_bot_state_table_created(self):
+        conn = db_module.get_db()
+        row = conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='bot_state'"
+        ).fetchone()
+        conn.close()
+        self.assertIsNotNone(row)
+
+    def test_add_log_message_id_appends_refs(self):
+        self.db.save_ticket(100, 42, "u", "T", "rp", "{}", "2024-01-01T00:00:00", guild_id=7)
+        self.assertTrue(self.db.add_log_message_id(100, 900, 500))
+        self.assertTrue(self.db.add_log_message_id(100, 901, 501))
+
+        ticket = self.db.get_ticket(100)
+        refs = self.db.parse_log_message_refs(ticket["log_message_ids"])
+        self.assertEqual(refs, [(900, 500), (901, 501)])
+
+    def test_add_log_message_id_unknown_ticket_returns_false(self):
+        self.assertFalse(self.db.add_log_message_id(999, 900, 500))
+
+    def test_parse_log_message_refs_tolerates_garbage(self):
+        self.assertEqual(self.db.parse_log_message_refs(None), [])
+        self.assertEqual(self.db.parse_log_message_refs("не-json"), [])
+        self.assertEqual(self.db.parse_log_message_refs('["x", 1]'), [])
+        self.assertEqual(self.db.parse_log_message_refs("[[1, 2]]"), [(1, 2)])
+
+
+class TestAnonymizeClosesOpenTickets(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
+        self.temp.close()
+        self._old_db_path = config.DB_PATH
+        config.DB_PATH = self.temp.name
+        importlib.reload(db_module)
+        importlib.reload(tickets_module)
+        self.db = tickets_module
+        self.db.init_db()
+
+    def tearDown(self):
+        config.DB_PATH = self._old_db_path
+        try:
+            os.unlink(self.temp.name)
+        except OSError:
+            pass
+
+    def test_open_ticket_becomes_closed_and_cleared(self):
+        self.db.save_ticket(
+            100, 42, "vasya", "T", "rp", '{"pii": 1}', "2024-01-01T00:00:00", guild_id=7
+        )
+        self.db.add_log_message_id(100, 900, 500)
+
+        changed = self.db.anonymize_user_tickets(7, 42)
+
+        self.assertEqual(changed, 1)
+        ticket = self.db.get_ticket(100)
+        self.assertEqual(ticket["status"], "closed")
+        self.assertIsNotNone(ticket["closed_at"])
+        self.assertEqual(ticket["user_id"], 0)
+        self.assertEqual(ticket["answers"], "{}")
+        self.assertIsNone(ticket["log_message_ids"])
+
+    def test_user_can_apply_again_after_erasure(self):
+        # анонимизированные строки не блокируют новую заявку того же человека
+        self.db.save_ticket(100, 42, "vasya", "T", "rp", "{}", "2024-01-01T00:00:00", guild_id=7)
+        self.db.anonymize_user_tickets(7, 42)
+        self.db.save_ticket(200, 42, "vasya", "T2", "rp", "{}", "2024-01-02T00:00:00", guild_id=7)
+
+        ticket = self.db.get_ticket(200)
+        self.assertEqual(ticket["status"], "open")
+
+
+class TestRetentionQueries(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
+        self.temp.close()
+        self._old_db_path = config.DB_PATH
+        config.DB_PATH = self.temp.name
+        importlib.reload(db_module)
+        importlib.reload(tickets_module)
+        self.db = tickets_module
+        self.db.init_db()
+
+    def tearDown(self):
+        config.DB_PATH = self._old_db_path
+        try:
+            os.unlink(self.temp.name)
+        except OSError:
+            pass
+
+    def _set_closed_at(self, channel_id, closed_at):
+        conn = db_module.get_db()
+        try:
+            conn.execute(
+                "UPDATE tickets SET closed_at = ? WHERE channel_id = ?",
+                (closed_at, channel_id),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+    def test_get_retention_expired_windows(self):
+        cutoff = "2024-06-01T00:00:00"
+        # давно закрыт — подлежит удалению
+        self.db.save_ticket(100, 1, "a", "T", "rp", "{}", "2024-01-01T00:00:00", guild_id=7)
+        self.db.update_ticket_status(100, "accepted", 9, "ок")
+        self._set_closed_at(100, "2024-01-15T00:00:00")
+        # закрыт недавно (после границы) — остаётся
+        self.db.save_ticket(101, 2, "b", "T", "rp", "{}", "2024-05-20T00:00:00", guild_id=7)
+        self.db.update_ticket_status(101, "denied", 9, "нет")
+        self._set_closed_at(101, "2024-06-05T00:00:00")
+        # давно открыт (заброшен) — подлежит удалению
+        self.db.save_ticket(102, 3, "c", "T", "rp", "{}", "2024-01-10T00:00:00", guild_id=7)
+
+        expired = self.db.get_retention_expired(cutoff)
+        expired_channels = {row["channel_id"] for row in expired}
+        self.assertEqual(expired_channels, {100, 102})
+
+    def test_delete_ticket_by_id(self):
+        self.db.save_ticket(100, 1, "a", "T", "rp", "{}", "2024-01-01T00:00:00", guild_id=7)
+        ticket = self.db.get_ticket(100)
+        self.assertTrue(self.db.delete_ticket_by_id(ticket["id"]))
+        self.assertIsNone(self.db.get_ticket(100))
+        self.assertFalse(self.db.delete_ticket_by_id(ticket["id"]))
+
+
 if __name__ == "__main__":
     unittest.main()

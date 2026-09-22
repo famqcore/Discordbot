@@ -1,3 +1,4 @@
+import asyncio
 import unittest
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -25,15 +26,22 @@ class TestSetupHook(unittest.IsolatedAsyncioTestCase):
         # persistent views: заявки, кнопки тикета, AFK-меню
         self.assertEqual(mock_add_view.call_count, 3)
 
-    async def test_on_ready_only_logs(self):
-        # on_ready больше не грузит расширения и не трогает БД:
-        # иначе при переподключении бот падал бы с ExtensionAlreadyLoaded
+    async def test_on_ready_only_logs_and_schedules_startup_check(self):
+        # on_ready не грузит расширения и не трогает БД (иначе при reconnect
+        # падал бы с ExtensionAlreadyLoaded), но один раз ставит в очередь
+        # проверку инфраструктуры — fail fast до первой заявки
         with patch("main.init_db") as mock_init:
             with patch("main.logger") as mock_logger:
-                await main_module.on_ready()
+                with patch("main.check_startup", new_callable=AsyncMock) as mock_check:
+                    main_module.bot.startup_checked = False
+                    await main_module.on_ready()
+                    await main_module.on_ready()  # reconnect: задача не дублируется
+                    await asyncio.sleep(0)
 
         mock_init.assert_not_called()
-        mock_logger.info.assert_called_once()
+        mock_logger.info.assert_called()
+        mock_check.assert_called_once()
+        main_module.bot.startup_checked = False
 
 
 class TestCommandError(unittest.IsolatedAsyncioTestCase):
@@ -87,6 +95,13 @@ class TestBotConfiguration(unittest.TestCase):
 
     def test_intents_members(self):
         self.assertTrue(main_module.bot.intents.members)
+
+    def test_client_mentions_policy_blocks_mass_pings(self):
+        # issue #4: клиентский default запрещает everyone/роли из любого текста
+        allowed = main_module.bot.allowed_mentions
+        self.assertFalse(allowed.everyone)
+        self.assertFalse(allowed.roles)
+        self.assertFalse(allowed.replied_user)
 
 
 if __name__ == "__main__":

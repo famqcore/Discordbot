@@ -4,20 +4,51 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
+# Ошибки разбора .env, собранные при импорте. validate() докладывает их до старта.
+_ENV_ERRORS: list[str] = []
+
 
 def _int_env(name: str):
-    """ID из .env как int; None, если переменная не задана или не число."""
+    """ID из .env как int; None, если переменная не задана.
+
+    Нечисловое значение — ошибка конфигурации: в .env нельзя написать
+    «какой-нибудь id» и получить молчаливую подмену поведения.
+    """
     value = os.getenv(name)
-    if not value:
+    if not value or not value.strip():
         return None
     value = value.strip()
-    return int(value) if value.isdigit() else None
+    if value.isdigit():
+        return int(value)
+    _ENV_ERRORS.append(f"{name}: значение «{value}» не похоже на Discord ID (нужны только цифры)")
+    return None
+
+
+def _bool_env(name: str, default: bool = False) -> bool:
+    value = os.getenv(name)
+    if value is None or not value.strip():
+        return default
+    return value.strip().lower() in ("1", "true", "yes", "on")
 
 
 def _int_list_env(name: str) -> list:
-    """Список ID из .env через запятую (пустой список, если не задано)."""
+    """Список ID из .env через запятую (пустой список, если не задано).
+
+    Нечисловые элементы — ошибка конфигурации, а не повод их пропустить:
+    оператор думает, что ID настроен, а бот его не видит.
+    """
     value = os.getenv(name, "")
-    return [int(p) for p in (x.strip() for x in value.split(",")) if p.isdigit()]
+    ids = []
+    for part in (x.strip() for x in value.split(",")):
+        if not part:
+            continue
+        if part.isdigit():
+            ids.append(int(part))
+        else:
+            _ENV_ERRORS.append(
+                f"{name}: элемент «{part}» не похож на Discord ID (нужны только цифры)"
+            )
+    return ids
 
 
 TOKEN = os.getenv("TOKEN")
@@ -26,9 +57,16 @@ LOG_DIR = os.path.join(os.path.dirname(__file__), "logs")
 
 # ---------------------------------------------------------------------------
 # ID всех объектов сервера задаются через .env (см. .env.example).
-# Бот работает по ID; имя используется только как запасной вариант,
-# если соответствующий ID не задан.
+# Бот работает строго по ID: имя никогда не заменяет заданный ID, а объект
+# без ID либо создаётся ботом приватным, либо безопасно пропускается.
+#
+# ALLOW_NAME_FALLBACK — небезопасный режим разработки: включает поиск
+# ролей/каналов по имени и переводит проверки инфраструктуры из фатальных
+# в предупреждения. НИКОГДА не включайте в production: имена в Discord
+# не уникальны, одноимённая роль может получить доступ к тикетам и логам.
 # ---------------------------------------------------------------------------
+
+ALLOW_NAME_FALLBACK = _bool_env("ALLOW_NAME_FALLBACK", False)
 
 # Категория для создания тикетов
 TICKETS_CATEGORY_NAME = "FAMQCORE • заявки"
@@ -75,6 +113,7 @@ LOG_KEY_AFK = "afk"  # установка/снятие AFK
 LOG_KEY_CALLS = "calls"  # вызовы на обзвон
 LOG_KEY_STATS = "stats"  # статистика
 LOG_KEY_ERRORS = "errors"  # ошибки бота
+LOG_KEY_AUDIT = "audit"  # аудит: удаление данных, ретенция
 
 LOG_THREAD_NAMES = {
     LOG_KEY_TICKETS: "📝-заявки",
@@ -83,6 +122,7 @@ LOG_THREAD_NAMES = {
     LOG_KEY_CALLS: "🔊-обзвоны",
     LOG_KEY_STATS: "📊-статистика",
     LOG_KEY_ERRORS: "🚨-ошибки",
+    LOG_KEY_AUDIT: "🧾-аудит",
 }
 
 LOG_THREAD_IDS = {
@@ -92,6 +132,18 @@ LOG_THREAD_IDS = {
     LOG_KEY_CALLS: _int_env("LOG_THREAD_CALLS_ID"),
     LOG_KEY_STATS: _int_env("LOG_THREAD_STATS_ID"),
     LOG_KEY_ERRORS: _int_env("LOG_THREAD_ERRORS_ID"),
+    LOG_KEY_AUDIT: _int_env("LOG_THREAD_AUDIT_ID"),
+}
+
+# Обратная связь ключ → имя переменной окружения (для сообщений об ошибках)
+LOG_THREAD_ENV_NAMES = {
+    LOG_KEY_TICKETS: "LOG_THREAD_TICKETS_ID",
+    LOG_KEY_DECISIONS: "LOG_THREAD_DECISIONS_ID",
+    LOG_KEY_AFK: "LOG_THREAD_AFK_ID",
+    LOG_KEY_CALLS: "LOG_THREAD_CALLS_ID",
+    LOG_KEY_STATS: "LOG_THREAD_STATS_ID",
+    LOG_KEY_ERRORS: "LOG_THREAD_ERRORS_ID",
+    LOG_KEY_AUDIT: "LOG_THREAD_AUDIT_ID",
 }
 
 # Команды
@@ -236,10 +288,43 @@ AFK_LOG_EXPIRED_TITLE = "⏰ AFK истёк"
 # Модераторское снятие AFK (команда !afk_remove)
 AFK_NO_PERMISSION = "⛔ Снимать AFK у других могут только модераторы."
 AFK_GUILD_ONLY = "AFK-меню работает только на сервере."
-PRIVACY_DELETE_DONE = (
-    "✅ Данные пользователя очищены: тикеты анонимизированы — {tickets}, "
-    "AFK-записи — {afk_users}, AFK-статистика — {afk_stats}, кулдауны — {afk_cooldown}."
+
+# Удаление персональных данных (!delete_user_data)
+PRIVACY_DELETE_CONFIRM = (
+    "⚠️ Удалить персональные данные {member} на этом сервере?\n\n"
+    "Будет выполнено, без возможности отката:\n"
+    "• открытый тикет и его канал с перепиской — удаляются;\n"
+    "• тикеты анонимизируются (ответы формы, имя и ID заявителя стираются);\n"
+    "• сохранённые сообщения лог-центра по этим тикетам (включая транскрипты) — удаляются;\n"
+    "• AFK-статус, AFK-статистика и кулдауны автоответов — удаляются.\n\n"
+    "Останется: агрегированная статистика без персональных данных, "
+    "записи аудита административных действий и копии в резервных бэкапах "
+    "до их ротации (см. docs/privacy.md)."
 )
+PRIVACY_DELETE_CONFIRM_BUTTON = "🗑 Да, удалить данные"
+PRIVACY_DELETE_CANCEL_BUTTON = "Отмена"
+PRIVACY_DELETE_CANCELLED = "Удаление данных отменено."
+PRIVACY_DELETE_FAILED = (
+    "⚠️ Удаление данных завершилось ошибкой. Часть данных могла остаться — "
+    "подробности в логе бота, повторите команду после устранения причины."
+)
+PRIVACY_DELETE_NOT_ADMIN = "Это подтверждение доступно только администратору, вызвавшему команду."
+PRIVACY_DELETE_DONE = (
+    "✅ Данные пользователя удалены в объёме политики приватности: "
+    "тикеты анонимизированы — {tickets} (каналов закрыто — {channels}), "
+    "сообщений лог-центра удалено — {log_messages}, "
+    "AFK-записи — {afk_users}, AFK-статистика — {afk_stats}, кулдауны — {afk_cooldown}. "
+    "Копии в резервных бэкапах исчезают по мере ротации бэкапов (см. docs/privacy.md)."
+)
+PRIVACY_AUDIT_TITLE = "🧾 Удаление персональных данных"
+RETENTION_AUDIT_TITLE = "🧾 Ретенция: очистка старых заявок"
+
+# Срок хранения тикетов и транскриптов (дни), по умолчанию 180.
+# Записи старше срока удаляются фоновой задачей вместе с привязанными
+# сообщениями лог-центра (docs/privacy.md).
+_retention_days = _int_env("TICKET_RETENTION_DAYS")
+TICKET_RETENTION_DAYS = _retention_days if _retention_days is not None else 180
+RETENTION_CHECK_SECONDS = _int_env("RETENTION_CHECK_SECONDS") or 86400
 
 # Поля эмбеда !afk_check
 AFK_FIELD_STATUS = "Статус"
@@ -249,11 +334,11 @@ AFK_FIELD_DURATION = "Время в AFK"
 
 
 def validate() -> list:
-    """Проверяет конфиг по жёстким лимитам Discord перед запуском.
+    """Проверяет конфиг перед запуском: лимиты Discord и целостность .env.
 
     Возвращает список найденных ошибок (пустой = всё ок).
     """
-    errors = []
+    errors = list(_ENV_ERRORS)
 
     for name, fields in (("RP_FIELDS", RP_FIELDS), ("CAPT_FIELDS", CAPT_FIELDS)):
         if len(fields) > 5:
@@ -267,5 +352,19 @@ def validate() -> list:
 
     if AFK_EXPIRY_CHECK_SECONDS < 10:
         errors.append("AFK_EXPIRY_CHECK_SECONDS слишком мал (< 10 сек)")
+
+    if TICKET_RETENTION_DAYS < 1:
+        errors.append("TICKET_RETENTION_DAYS должен быть положительным числом дней")
+
+    if RETENTION_CHECK_SECONDS < 60:
+        errors.append("RETENTION_CHECK_SECONDS слишком мал (< 60 сек)")
+
+    # ветка логов без своего канала не однозначна: родительская
+    # приватность проверяется у канала, поэтому он обязателен
+    if LOG_CHANNEL_ID is None and any(LOG_THREAD_IDS.values()):
+        errors.append(
+            "Заданы ID веток лог-центра без LOG_CHANNEL_ID — "
+            "задайте и канал, иначе приватность ветки нечем гарантировать"
+        )
 
     return errors

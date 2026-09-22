@@ -1,3 +1,4 @@
+import json
 from datetime import datetime
 
 from .db import get_db
@@ -195,10 +196,77 @@ def get_all_tickets(limit=50, guild_id=0):
         conn.close()
 
 
+def get_user_tickets(guild_id, user_id):
+    """Все тикеты пользователя на сервере (для удаления данных)."""
+    conn = get_db()
+    try:
+        c = conn.cursor()
+        c.execute(
+            """
+            SELECT * FROM tickets
+            WHERE guild_id = ? AND user_id = ?
+            ORDER BY id
+            """,
+            (guild_id, user_id),
+        )
+        return c.fetchall()
+    finally:
+        conn.close()
+
+
+def add_log_message_id(channel_id, thread_id, message_id):
+    """Запоминает сообщение лог-центра, связанное с тикетом.
+
+    Хранится JSON-массив пар [thread_id, message_id] — по ним удаление
+    персональных данных и ретенция находят и стирают логовые вложения
+    (транскрипты) в Discord.
+    """
+    conn = get_db()
+    try:
+        c = conn.cursor()
+        row = c.execute(
+            "SELECT log_message_ids FROM tickets WHERE channel_id = ?",
+            (channel_id,),
+        ).fetchone()
+        if not row:
+            return False
+        refs = parse_log_message_refs(row["log_message_ids"])
+        refs.append([int(thread_id), int(message_id)])
+        c.execute(
+            "UPDATE tickets SET log_message_ids = ? WHERE channel_id = ?",
+            (json.dumps(refs), channel_id),
+        )
+        conn.commit()
+        return c.rowcount > 0
+    finally:
+        conn.close()
+
+
+def parse_log_message_refs(raw):
+    """JSON из tickets.log_message_ids -> список пар (thread_id, message_id)."""
+    if not raw:
+        return []
+    try:
+        data = json.loads(raw)
+    except (TypeError, ValueError):
+        return []
+    refs = []
+    for item in data:
+        try:
+            thread_id, message_id = item
+            refs.append((int(thread_id), int(message_id)))
+        except (TypeError, ValueError):
+            continue
+    return refs
+
+
 def anonymize_user_tickets(guild_id, user_id):
     """Удаляет персональные поля пользователя из тикетов сервера.
 
-    Агрегированная статистика остаётся: она уже не содержит персональных данных.
+    Ответы формы, имя и ID заявителя стираются, связи с сообщениями
+    лог-центра очищаются (сами сообщения удаляет вызывающий код), открытые
+    тикеты переводятся в закрытые: их каналы на этом шаге уже удалены.
+    Агрегированная статистика остаётся: она не содержит персональных данных.
     """
     conn = get_db()
     try:
@@ -209,13 +277,60 @@ def anonymize_user_tickets(guild_id, user_id):
             SET user_id = ?,
                 user_name = ?,
                 answers = '{}',
-                reason = NULL
+                reason = NULL,
+                log_message_ids = NULL,
+                status = CASE WHEN status = 'open' THEN 'closed' ELSE status END,
+                closed_at = CASE
+                    WHEN status = 'open' AND closed_at IS NULL THEN ?
+                    ELSE closed_at
+                END
             WHERE guild_id = ? AND user_id = ?
             """,
-            (ANONYMIZED_USER_ID, ANONYMIZED_USER_NAME, guild_id, user_id),
+            (
+                ANONYMIZED_USER_ID,
+                ANONYMIZED_USER_NAME,
+                datetime.now().isoformat(),
+                guild_id,
+                user_id,
+            ),
         )
         changed = c.rowcount
         conn.commit()
         return changed
+    finally:
+        conn.close()
+
+
+def get_retention_expired(cutoff_iso):
+    """Тикеты старше срока хранения.
+
+    Закрытые — по дате закрытия, открытые (заброшенные) — по дате создания.
+    """
+    conn = get_db()
+    try:
+        c = conn.cursor()
+        c.execute(
+            """
+            SELECT * FROM tickets
+            WHERE (status != 'open' AND closed_at IS NOT NULL AND closed_at < ?)
+               OR (status = 'open' AND created_at < ?)
+            ORDER BY id
+            """,
+            (cutoff_iso, cutoff_iso),
+        )
+        return c.fetchall()
+    finally:
+        conn.close()
+
+
+def delete_ticket_by_id(ticket_id):
+    """Полностью удаляет запись тикета (используется ретенцией)."""
+    conn = get_db()
+    try:
+        c = conn.cursor()
+        c.execute("DELETE FROM tickets WHERE id = ?", (ticket_id,))
+        deleted = c.rowcount > 0
+        conn.commit()
+        return deleted
     finally:
         conn.close()

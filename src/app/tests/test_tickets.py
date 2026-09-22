@@ -72,8 +72,12 @@ class TestCreateTicket(unittest.TestCase):
         }
 
         with patch("tickets.create_ticket.save_ticket") as mock_save:
-            with patch("tickets.create_ticket.FullTicketView", return_value=MagicMock()):
-                self.loop.run_until_complete(create_ticket(interaction, "RP ЗАЯВКА", "rp", inputs))
+            with patch("tickets.create_ticket.send_to_log", new_callable=AsyncMock):
+                with patch("tickets.create_ticket.add_log_message_id"):
+                    with patch("tickets.create_ticket.FullTicketView", return_value=MagicMock()):
+                        self.loop.run_until_complete(
+                            create_ticket(interaction, "RP ЗАЯВКА", "rp", inputs)
+                        )
 
         interaction.response.send_message.assert_called_once()
         interaction.guild.create_text_channel.assert_called_once()
