@@ -144,7 +144,11 @@ def _parse_clock(match: re.Match, moment: datetime) -> ParsedDuration:
 
     return_at = clock.to_utc(target)
     minutes = int((return_at - moment).total_seconds() // 60)
-    return ParsedDuration(return_at=_validated_return(moment, minutes), minutes=minutes)
+    # Границы проверяем по длительности, но возвращаем именно названный
+    # момент: пересчёт «момент + minutes» терял бы секунды и превращал
+    # «вернусь в 04:00» в 03:59:xx.
+    _validated_return(moment, minutes)
+    return ParsedDuration(return_at=return_at, minutes=minutes)
 
 
 def _validated_return(moment: datetime, minutes: int) -> datetime:

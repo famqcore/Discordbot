@@ -21,6 +21,7 @@
 from __future__ import annotations
 
 import os
+import re
 import sqlite3
 from collections.abc import Callable
 from datetime import datetime
@@ -96,8 +97,40 @@ def index_names_of(conn: Connection, table: str) -> set[str]:
     return {row["name"] for row in conn.execute(f"PRAGMA index_list({table})")}
 
 
-def inspect_table(conn: Connection, table: Table) -> list[str]:
-    """Расхождения фактической таблицы с каноном. Пустой список — всё ок."""
+_INDEX_NAME_RE = re.compile(
+    r"CREATE\s+(?:UNIQUE\s+)?INDEX\s+(?:IF\s+NOT\s+EXISTS\s+)?(\w+)",
+    re.IGNORECASE,
+)
+
+
+def declared_index_names(table: Table) -> set[str]:
+    """Имена индексов, объявленных в каноне таблицы."""
+    names = set()
+    for index_sql in table.indexes:
+        match = _INDEX_NAME_RE.search(index_sql)
+        if match:
+            names.add(match.group(1))
+    return names
+
+
+def missing_indexes(conn: Connection, table: Table) -> set[str]:
+    """Индексы канона, которых нет в базе.
+
+    Индекс могли удалить вручную или потерять при восстановлении из дампа.
+    Без этой проверки база с корректными колонками считается здоровой,
+    а запросы тихо уходят в полное сканирование.
+    """
+    if not table_exists(conn, table.name):
+        return declared_index_names(table)
+    return declared_index_names(table) - index_names_of(conn, table.name)
+
+
+def inspect_table(conn: Connection, table: Table, *, check_indexes: bool = True) -> list[str]:
+    """Расхождения фактической таблицы с каноном. Пустой список — всё ок.
+
+    ``check_indexes=False`` оставляет только структурные расхождения — те,
+    что лечатся исключительно перестроением таблицы.
+    """
     if not table_exists(conn, table.name):
         return [f"таблица {table.name} отсутствует"]
 
@@ -124,6 +157,11 @@ def inspect_table(conn: Connection, table: Table) -> list[str]:
         column = actual_columns.get(name)
         if column is not None and not column["notnull"]:
             problems.append(f"{table.name}: колонка {name} допускает NULL")
+
+    if check_indexes:
+        absent = missing_indexes(conn, table)
+        if absent:
+            problems.append(f"{table.name}: нет индексов {', '.join(sorted(absent))}")
 
     return problems
 
@@ -253,13 +291,18 @@ def rebuild_table(conn: Connection, table: Table, *, reason: str) -> None:
 
 
 def ensure_table(conn: Connection, table: Table) -> None:
-    """Приводит таблицу к канону: индексы либо полный rebuild."""
-    problems = inspect_table(conn, table)
-    if not problems:
-        for index_sql in table.indexes:
-            conn.execute(index_sql)
+    """Приводит таблицу к канону: индексы либо полный rebuild.
+
+    Отсутствующий индекс создаётся отдельным ``CREATE INDEX`` — ради него
+    перестраивать таблицу не нужно. Перестроение остаётся только для
+    структурных расхождений: колонок, PK, UNIQUE и NOT NULL.
+    """
+    problems = inspect_table(conn, table, check_indexes=False)
+    if problems:
+        rebuild_table(conn, table, reason="; ".join(problems))
         return
-    rebuild_table(conn, table, reason="; ".join(problems))
+    for index_sql in table.indexes:
+        conn.execute(index_sql)
 
 
 # ---------------------------------------------------------------------------

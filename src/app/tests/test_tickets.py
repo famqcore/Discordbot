@@ -11,6 +11,7 @@ from tests.support import (
     FakeGuild,
     FakeInteraction,
     FakeMember,
+    label_of,
     use_temp_database,
 )
 from tickets.call_voice import VoiceCallButton, VoiceSelectView
@@ -36,7 +37,7 @@ class TestTicketModal(unittest.TestCase):
     def test_modal_input_values(self):
         modal = TicketModal("Test", "rp", config.RP_FIELDS)
         first = modal.children[0]
-        self.assertEqual(first.label, config.RP_FIELDS[0][0])
+        self.assertEqual(label_of(first), config.RP_FIELDS[0][0])
         self.assertEqual(first.placeholder, config.RP_FIELDS[0][1])
         self.assertTrue(first.required)
 
@@ -122,13 +123,13 @@ class TestModals(unittest.TestCase):
         modal = DecisionReasonModal(MagicMock(), ACCEPT)
         self.assertEqual(modal.title, "Принятие заявки")
         self.assertEqual(len(modal.children), 1)
-        self.assertEqual(modal.children[0].label, "Причина принятия")
+        self.assertEqual(label_of(modal.children[0]), "Причина принятия")
 
     def test_deny_reason_modal(self):
         modal = DecisionReasonModal(MagicMock(), DENY)
         self.assertEqual(modal.title, "Отклонение заявки")
         self.assertEqual(len(modal.children), 1)
-        self.assertEqual(modal.children[0].label, "Причина отказа")
+        self.assertEqual(label_of(modal.children[0]), "Причина отказа")
 
 
 class TestPersistentButtons(unittest.TestCase):

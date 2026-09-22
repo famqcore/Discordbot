@@ -5,6 +5,7 @@ import discord
 
 import config
 from afk.views import AfkMenuView, AfkReturnView, AfkSetModal, build_afk_embed, parse_return_time
+from tests.support import label_of
 from utils import clock
 
 
@@ -368,14 +369,14 @@ class TestAfkSetModal(unittest.TestCase):
         member = MagicMock()
         modal = AfkSetModal(member, 123, MagicMock())
         inp = modal.children[0]
-        self.assertEqual(inp.label, config.AFK_MODAL_REASON_LABEL)
+        self.assertEqual(label_of(inp), config.AFK_MODAL_REASON_LABEL)
         self.assertFalse(inp.required)
 
     def test_duration_input(self):
         member = MagicMock()
         modal = AfkSetModal(member, 123, MagicMock())
         inp = modal.children[1]
-        self.assertEqual(inp.label, config.AFK_MODAL_DURATION_LABEL)
+        self.assertEqual(label_of(inp), config.AFK_MODAL_DURATION_LABEL)
         self.assertTrue(inp.required)
 
 

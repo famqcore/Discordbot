@@ -25,6 +25,7 @@ from database.migrations import migrate_schema
 
 __all__ = [
     "AsyncIterator",
+    "label_of",
     "DatabaseTestCase",
     "FakeChannel",
     "FakeGuild",
@@ -37,6 +38,19 @@ __all__ = [
     "make_not_found",
     "use_temp_database",
 ]
+
+
+def label_of(item) -> str | None:
+    """Подпись элемента формы без обращения к устаревшему свойству.
+
+    ``discord.ui.TextInput.label`` помечен deprecated в discord.py 2.6+,
+    а тесты запускаются с DeprecationWarning как ошибкой (issue #16).
+    Значение читается из нижележащего компонента, который и хранит его.
+    """
+    underlying = getattr(item, "_underlying", None)
+    if underlying is not None and hasattr(underlying, "label"):
+        return underlying.label
+    return getattr(item, "label", None)
 
 
 # --------------------------------------------------------------------------
