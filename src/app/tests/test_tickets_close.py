@@ -32,13 +32,15 @@ class TestCloseButton(unittest.IsolatedAsyncioTestCase):
         with patch("tickets.close_ticket.get_ticket") as mock_get:
             with patch("tickets.close_ticket.update_ticket_status") as mock_update:
                 with patch("tickets.close_ticket.send_to_log", new_callable=AsyncMock) as mock_log:
-                    mock_get.return_value = {"user_id": 7, "topic": "RP ЗАЯВКА"}
-                    await CloseButton().callback(interaction)
+                    with patch("tickets.close_ticket.add_log_message_id") as mock_track:
+                        mock_get.return_value = {"user_id": 7, "topic": "RP ЗАЯВКА"}
+                        await CloseButton().callback(interaction)
 
         interaction.response.send_message.assert_awaited_once()
         mock_update.assert_called_once_with(123, "closed", closed_by=interaction.user.id)
         interaction.channel.delete.assert_awaited_once()
         mock_log.assert_awaited_once()
+        mock_track.assert_called_once()
 
     async def test_regular_member_cannot_close(self):
         interaction = self._make_interaction(staff=False)
@@ -59,8 +61,9 @@ class TestCloseButton(unittest.IsolatedAsyncioTestCase):
         with patch("tickets.close_ticket.get_ticket") as mock_get:
             with patch("tickets.close_ticket.update_ticket_status"):
                 with patch("tickets.close_ticket.send_to_log", new_callable=AsyncMock):
-                    mock_get.return_value = {"user_id": 7, "topic": "RP ЗАЯВКА"}
-                    await CloseButton().callback(interaction)
+                    with patch("tickets.close_ticket.add_log_message_id"):
+                        mock_get.return_value = {"user_id": 7, "topic": "RP ЗАЯВКА"}
+                        await CloseButton().callback(interaction)
 
         applicant.send.assert_awaited_once()
 

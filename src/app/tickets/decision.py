@@ -4,9 +4,10 @@ from datetime import datetime
 import discord
 
 import config
-from database.tickets_db import get_ticket, update_ticket_status
+from database.tickets_db import add_log_message_id, get_ticket, update_ticket_status
 from utils.logcenter import LOG_KEY_DECISIONS, send_to_log
 from utils.logger import logger
+from utils.mentions import escape_user_text, mentions_for
 from utils.permissions import is_staff
 
 from .transcript import build_transcript_file
@@ -78,11 +79,14 @@ class DecisionReasonModal(discord.ui.Modal):
         ticket = get_ticket(self.channel.id)
         applicant = guild.get_member(ticket["user_id"]) if ticket and guild else None
         mention = applicant.mention if applicant else "—"
+        # причина — ввод модератора, но доверять ему нельзя: экранируем,
+        # чтобы из решения нельзя было собрать массовый пинг
+        reason = escape_user_text(self.reason.value)
 
         # заявитель должен узнать о решении, а не только молча исчезнуть вместе с каналом
         if applicant:
             try:
-                await applicant.send(decision.dm_text.format(reason=self.reason.value))
+                await applicant.send(decision.dm_text.format(reason=reason))
             except Exception:
                 pass  # личка закрыта — не критично
 
@@ -94,12 +98,15 @@ class DecisionReasonModal(discord.ui.Modal):
             timestamp=datetime.now(),
         )
         embed.add_field(name="Заявитель", value=mention, inline=False)
-        embed.add_field(name="Причина", value=self.reason.value, inline=False)
+        embed.add_field(name="Причина", value=reason, inline=False)
         embed.add_field(name="Рекрут", value=interaction.user.mention, inline=False)
-        await send_to_log(guild, LOG_KEY_DECISIONS, embed=embed, files=files)
+        log_message = await send_to_log(guild, LOG_KEY_DECISIONS, embed=embed, files=files)
+        if log_message is not None:
+            add_log_message_id(self.channel.id, log_message.channel.id, log_message.id)
 
         await self.channel.send(
-            decision.channel_note.format(mention=mention, reason=self.reason.value)
+            decision.channel_note.format(mention=mention, reason=reason),
+            allowed_mentions=mentions_for(users=[applicant] if applicant else []),
         )
         await interaction.response.send_message(
             f"{decision.reply_text}. Тикет удаляется.", ephemeral=True

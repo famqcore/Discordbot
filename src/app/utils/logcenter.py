@@ -1,17 +1,28 @@
 """Лог-центр: один приватный канал, внутри — ветки по категориям логов.
 
-Канал и ветки ищутся по ID из .env (приоритетно) или по имени (фолбэк),
-а при отсутствии — создаются автоматически. Лог-канал создаётся приватным:
-закрыт для @everyone, открыт боту и стафф-ролям.
+Принцип fail closed: транскрипты и метаданные заявок отправляются только
+в точку, прошедшую проверку приватности.
 
-Гарантия устойчивости: send_to_log никогда не бросает исключений наружу —
-логирование не должно ронять основную логику бота.
+- Настроенный LOG_CHANNEL_ID / LOG_THREAD_*_ID (внешний объект) проверяется
+  на тип, принадлежность серверу и приватность: @everyone без просмотра,
+  доступ только у стафф-ролей и бота. Не прошёл проверку — данных туда нет,
+  никакого fallback в корень канала или «куда-нибудь».
+- Если ID не заданы, бот создаёт свой управляемый приватный лог-центр
+  (закрыт для @everyone, открыт боту и STAFF_ROLE_IDS) и запоминает ID
+  созданных объектов в bot_state. Управляемый канал принадлежит боту,
+  поэтому дрейф прав чинится принудительно и заметно.
+
+Гарантия устойчивости: send_to_log никогда не бросает исключений наружу
+(логирование не должно ронять основную логику бота), но вернёт None,
+если отправка отклонена проверками.
 """
 
 import discord
 
 import config
+from database import state_db
 from utils.logger import logger
+from utils.mentions import mentions_for
 
 # Ключи веток (совпадают с config.LOG_KEY_*)
 LOG_KEY_TICKETS = config.LOG_KEY_TICKETS
@@ -20,6 +31,7 @@ LOG_KEY_AFK = config.LOG_KEY_AFK
 LOG_KEY_CALLS = config.LOG_KEY_CALLS
 LOG_KEY_STATS = config.LOG_KEY_STATS
 LOG_KEY_ERRORS = config.LOG_KEY_ERRORS
+LOG_KEY_AUDIT = config.LOG_KEY_AUDIT
 
 MAX_AUTO_ARCHIVE = 10080  # неделя — максимум у Discord
 
@@ -37,79 +49,264 @@ def _private_overwrites(guild):
     return overwrites
 
 
-async def _resolve_log_channel(guild):
-    """Канал лог-центра: по ID → по имени → автосоздание (приватный)."""
-    if config.LOG_CHANNEL_ID:
-        channel = guild.get_channel(config.LOG_CHANNEL_ID)
-        if channel is None:
-            try:
-                channel = await guild.fetch_channel(config.LOG_CHANNEL_ID)
-            except Exception:
-                channel = None
-        if channel is not None:
-            return channel
-        logger.warning(f"Лог-канал с ID {config.LOG_CHANNEL_ID} не найден, ищу по имени")
+def audit_channel_privacy(guild, channel) -> list[str]:
+    """Аудит приватности лог-канала. Пустой список — канал безопасен.
 
-    channel = discord.utils.get(guild.text_channels, name=config.LOG_CHANNEL_NAME)
-    if channel is None:
-        channel = await guild.create_text_channel(
-            config.LOG_CHANNEL_NAME, overwrites=_private_overwrites(guild)
-        )
-        logger.info(f"Создал приватный лог-канал «{config.LOG_CHANNEL_NAME}»")
+    Транскрипты нельзя хранить в канале, который виден шире, чем
+    утверждённый круг: бот + STAFF_ROLE_IDS. Роли с правом Administrator
+    видят любой канал на уровне Discord — это граница доверия сервера,
+    проверка их не охватывает.
+    """
+    if not isinstance(channel, discord.TextChannel):
+        return [f"объект {getattr(channel, 'id', channel)} не является текстовым каналом сервера"]
+    if getattr(getattr(channel, "guild", None), "id", None) != getattr(guild, "id", None):
+        return [f"канал {channel.id} принадлежит другому серверу"]
+
+    problems = []
+    if channel.permissions_for(guild.default_role).view_channel:
+        problems.append("@everyone видит канал — логи с транскриптами должны быть приватными")
+
+    bot_user_id = getattr(getattr(guild, "me", None), "id", None)
+    bot_role_ids = {getattr(role, "id", None) for role in getattr(guild.me, "roles", []) or []}
+    approved_role_ids = set(config.STAFF_ROLE_IDS)
+
+    for target, overwrite in channel.overwrites.items():
+        if overwrite.view_channel is not True:
+            continue
+        if isinstance(target, discord.Role):
+            if target.is_default():
+                continue  # уже разобран выше через permissions_for
+            if target.id in approved_role_ids or target.id in bot_role_ids:
+                continue
+            problems.append(
+                f"роль «{getattr(target, 'name', target.id)}» видит канал, "
+                "но не входит в утверждённые STAFF_ROLE_IDS"
+            )
+        else:
+            # персональный overwrite участника: допустим только для самого бота
+            if getattr(target, "id", None) == bot_user_id:
+                continue
+            problems.append(
+                f"участник {getattr(target, 'id', target)} имеет персональный доступ к каналу"
+            )
+    return problems
+
+
+async def _audit_thread(guild, channel, thread) -> list[str]:
+    """Проверка ветки лог-центра: тип, сервер, родитель, разархивирование."""
+    if not isinstance(thread, discord.Thread):
+        return [f"объект {getattr(thread, 'id', thread)} не является веткой"]
+    if getattr(getattr(thread, "guild", None), "id", None) != getattr(guild, "id", None):
+        return [f"ветка {thread.id} принадлежит другому серверу"]
+    if getattr(thread, "parent_id", None) != getattr(channel, "id", None):
+        return [f"ветка {thread.id} находится не в настроенном лог-канале"]
+    if getattr(thread, "archived", False):
+        try:
+            await thread.edit(archived=False)
+            logger.info(f"logcenter: ветка «{getattr(thread, 'name', thread.id)}» разархивирована")
+        except Exception as e:
+            return [f"ветка {thread.id} архивирована, разархивировать не удалось: {e}"]
+    return []
+
+
+async def _fetch_guild_channel(guild, channel_id):
+    """Канал/ветка из кэша сервера или API; None, если не существует."""
+    channel = guild.get_channel(channel_id) or guild.get_thread(channel_id)
+    if channel is not None:
+        return channel
+    try:
+        return await guild.fetch_channel(channel_id)
+    except Exception:
+        return None
+
+
+async def _repair_managed_channel(guild, channel) -> bool:
+    """Управляемый канал принадлежит боту: права приводятся к приватным."""
+    if not isinstance(channel, discord.TextChannel):
+        return False
+    if getattr(getattr(channel, "guild", None), "id", None) != getattr(guild, "id", None):
+        return False
+    try:
+        await channel.edit(overwrites=_private_overwrites(guild))
+    except Exception as e:
+        logger.error(f"logcenter: не удалось восстановить права лог-канала: {e}")
+        return False
+    logger.warning(
+        f"logcenter: права управляемого лог-канала {channel.id} приведены к приватным "
+        "(обнаружен дрейф конфигурации сервера)"
+    )
+    return True
+
+
+async def _resolve_log_channel(guild):
+    """Лог-канал: внешний по LOG_CHANNEL_ID (строгая проверка) или управляемый."""
+    if config.LOG_CHANNEL_ID:
+        channel = await _fetch_guild_channel(guild, config.LOG_CHANNEL_ID)
+        if channel is None:
+            logger.error(f"logcenter: LOG_CHANNEL_ID={config.LOG_CHANNEL_ID} не найден")
+            return None
+        problems = audit_channel_privacy(guild, channel)
+        if problems:
+            logger.error(
+                f"logcenter: настроенный канал {config.LOG_CHANNEL_ID} небезопасен: "
+                f"{'; '.join(problems)}"
+            )
+            return None
+        return channel
+
+    # Управляемый канал: ищем сохранённый ID, чиним права при дрейфе,
+    # отсутствующий — создаём приватным.
+    state_key = f"log_channel:{getattr(guild, 'id', 0)}"
+    stored = state_db.get_state(state_key)
+    if stored and stored.isdigit():
+        channel = await _fetch_guild_channel(guild, int(stored))
+        if channel is not None:
+            if not audit_channel_privacy(guild, channel):
+                return channel
+            if await _repair_managed_channel(guild, channel):
+                return channel
+            return None
+        state_db.delete_state(state_key)
+
+    channel = await guild.create_text_channel(
+        config.LOG_CHANNEL_NAME, overwrites=_private_overwrites(guild)
+    )
+    state_db.set_state(state_key, str(channel.id))
+    logger.info(f"Создал приватный лог-канал «{config.LOG_CHANNEL_NAME}»")
     return channel
 
 
 async def _resolve_thread(guild, key: str):
-    """Ветка для категории логов: по ID → по имени → автосоздание."""
+    """Ветка логов: внешняя по LOG_THREAD_*_ID (строгая проверка) или управляемая."""
     channel = await _resolve_log_channel(guild)
+    if channel is None or not isinstance(channel, discord.TextChannel):
+        return None
 
     thread_id = config.LOG_THREAD_IDS.get(key)
     name = config.LOG_THREAD_NAMES.get(key, key)
+    env_name = config.LOG_THREAD_ENV_NAMES.get(key, key)
 
     if thread_id:
-        thread = guild.get_thread(thread_id)
+        thread = await _fetch_guild_channel(guild, thread_id)
         if thread is None:
-            try:
-                thread = await guild.fetch_channel(thread_id)
-            except Exception:
-                thread = None
-        if thread is not None:
-            return thread
-        logger.warning(f"Ветка логов «{key}» с ID {thread_id} не найдена, ищу по имени")
+            logger.error(f"logcenter: {env_name}={thread_id} не найден")
+            return None
+        problems = await _audit_thread(guild, channel, thread)
+        if problems:
+            logger.error(
+                f"logcenter: {env_name}={thread_id} не прошёл проверку: {'; '.join(problems)}"
+            )
+            return None
+        return thread
 
-    thread = discord.utils.get(channel.threads, name=name)
-    if thread is None:
-        thread = await channel.create_thread(
-            name=name,
-            type=discord.ChannelType.public_thread,
-            auto_archive_duration=MAX_AUTO_ARCHIVE,
-        )
-        logger.info(f"Создал ветку логов «{name}» в канале «{config.LOG_CHANNEL_NAME}»")
+    state_key = f"log_thread:{getattr(guild, 'id', 0)}:{key}"
+    stored = state_db.get_state(state_key)
+    if stored and stored.isdigit():
+        thread = await _fetch_guild_channel(guild, int(stored))
+        if thread is not None:
+            problems = await _audit_thread(guild, channel, thread)
+            if not problems:
+                return thread
+            logger.warning(
+                f"logcenter: управляемая ветка «{key}» не прошла проверку "
+                f"({'; '.join(problems)}), пересоздаю"
+            )
+        state_db.delete_state(state_key)
+
+    thread = await channel.create_thread(
+        name=name,
+        type=discord.ChannelType.public_thread,
+        auto_archive_duration=MAX_AUTO_ARCHIVE,
+    )
+    state_db.set_state(state_key, str(thread.id))
+    logger.info(f"Создал ветку логов «{name}» в канале «{config.LOG_CHANNEL_NAME}»")
     return thread
 
 
-async def send_to_log(guild, key: str, content: str | None = None, embed=None, files=None) -> bool:
-    """Отправляет сообщение в ветку лог-центра.
+async def validate_log_center_config(guild) -> list[str]:
+    """Проверка настроенного лог-центра на старте. Пустой список — всё ок.
 
-    Возвращает True при успехе. Никогда не бросает исключений:
-    при недоступной ветке шлёт в корень канала, при недоступном канале — False.
+    Ненастроенный лог-центр — не ошибка: бот создаст управляемый приватный
+    при первой записи.
+    """
+    if config.LOG_CHANNEL_ID is None:
+        return []
+
+    channel = await _fetch_guild_channel(guild, config.LOG_CHANNEL_ID)
+    if channel is None:
+        return [f"LOG_CHANNEL_ID={config.LOG_CHANNEL_ID}: канал не найден"]
+
+    problems = [
+        f"LOG_CHANNEL_ID={config.LOG_CHANNEL_ID}: {p}"
+        for p in audit_channel_privacy(guild, channel)
+    ]
+    if not isinstance(channel, discord.TextChannel):
+        return problems
+
+    for key, thread_id in config.LOG_THREAD_IDS.items():
+        if thread_id is None:
+            continue
+        env_name = config.LOG_THREAD_ENV_NAMES.get(key, key)
+        thread = await _fetch_guild_channel(guild, thread_id)
+        if thread is None:
+            problems.append(f"{env_name}={thread_id}: ветка не найдена")
+            continue
+        problems.extend(
+            f"{env_name}={thread_id}: {p}" for p in await _audit_thread(guild, channel, thread)
+        )
+    return problems
+
+
+async def send_to_log(
+    guild, key: str, content: str | None = None, embed=None, files=None
+) -> discord.Message | None:
+    """Отправляет сообщение в проверенную ветку лог-центра.
+
+    Возвращает отправленное сообщение (нужно удалению данных, чтобы потом
+    стереть транскрипты) или None, если точка отправки не прошла проверку
+    приватности/конфигурации. Исключения наружу не выбрасываются.
     """
     if guild is None:
-        return False
+        return None
 
     try:
         destination = await _resolve_thread(guild, key)
     except Exception as e:
-        logger.warning(f"logcenter: ветка «{key}» недоступна ({e}), пробую сам канал")
-        try:
-            destination = await _resolve_log_channel(guild)
-        except Exception as e2:
-            logger.error(f"logcenter: лог-канал недоступен: {e2}")
-            return False
+        logger.error(f"logcenter: не удалось подготовить ветку «{key}»: {e}")
+        return None
+
+    if destination is None:
+        logger.error(
+            f"logcenter: отправка «{key}» отклонена — лог-центр не прошёл проверку "
+            "(fail closed: чувствительные данные не покидают проверенный контур)"
+        )
+        return None
 
     try:
-        await destination.send(content=content, embed=embed, files=files)
-        return True
+        return await destination.send(
+            content=content, embed=embed, files=files, allowed_mentions=mentions_for()
+        )
     except Exception as e:
-        logger.warning(f"logcenter: не удалось отправить лог «{key}»: {e}")
-        return False
+        logger.error(f"logcenter: не удалось отправить лог «{key}»: {e}")
+        return None
+
+
+async def delete_log_messages(guild, refs) -> int:
+    """Удаляет сообщения лог-центра по парам (thread_id, message_id).
+
+    Используется удалением персональных данных и ретенцией, чтобы стереть
+    сохранённые транскрипты. Возвращает число удалённых сообщений.
+    """
+    deleted = 0
+    for thread_id, message_id in refs:
+        try:
+            thread = await _fetch_guild_channel(guild, thread_id)
+            if thread is None:
+                logger.warning(f"logcenter: ветка {thread_id} недоступна, сообщение не удалено")
+                continue
+            message = await thread.fetch_message(message_id)
+            await message.delete()
+            deleted += 1
+        except Exception as e:
+            logger.warning(f"logcenter: не удалось удалить сообщение {message_id}: {e}")
+    return deleted

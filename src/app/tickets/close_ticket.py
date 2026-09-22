@@ -1,7 +1,7 @@
 import discord
 
 import config
-from database.tickets_db import get_ticket, update_ticket_status
+from database.tickets_db import add_log_message_id, get_ticket, update_ticket_status
 from utils.logcenter import LOG_KEY_DECISIONS, send_to_log
 from utils.logger import logger
 from utils.permissions import is_staff
@@ -47,7 +47,9 @@ class CloseButton(discord.ui.Button):
             name="Тикет", value=ticket["topic"] if ticket else channel.name, inline=True
         )
         embed.add_field(name="Закрыл", value=interaction.user.mention, inline=True)
-        await send_to_log(guild, LOG_KEY_DECISIONS, embed=embed, files=files)
+        log_message = await send_to_log(guild, LOG_KEY_DECISIONS, embed=embed, files=files)
+        if log_message is not None:
+            add_log_message_id(channel.id, log_message.channel.id, log_message.id)
 
         try:
             await channel.delete(reason=f"Тикет закрыт модератором {interaction.user}")

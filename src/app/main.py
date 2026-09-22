@@ -1,3 +1,5 @@
+import asyncio
+
 import discord
 from discord.ext import commands
 
@@ -8,6 +10,8 @@ from tickets.commands import TicketTypeView
 from tickets.views import FullTicketView
 from utils.logcenter import LOG_KEY_ERRORS, send_to_log
 from utils.logger import logger
+from utils.mentions import DEFAULT_ALLOWED_MENTIONS
+from utils.startup import check_startup
 
 intents = discord.Intents.default()
 intents.message_content = True
@@ -15,6 +19,11 @@ intents.members = True
 
 
 class FamqCoreBot(commands.Bot):
+    # инфраструктурная проверка выполняется один раз после первого READY;
+    # startup_failed означает, что бот остановлен из-за ошибки конфигурации
+    startup_checked = False
+    startup_failed = False
+
     async def setup_hook(self):
         # setup_hook вызывается один раз при старте; on_ready — при каждом
         # переподключении, поэтому загрузка расширений живёт только здесь
@@ -30,12 +39,23 @@ class FamqCoreBot(commands.Bot):
         self.add_view(AfkMenuView())
 
 
-bot = FamqCoreBot(command_prefix=config.CMD_PREFIX, intents=intents)
+bot = FamqCoreBot(
+    command_prefix=config.CMD_PREFIX,
+    intents=intents,
+    # массовые пинги и пинги ролей запрещены глобально; адресные служебные
+    # упоминания задаются явно в точках отправки (utils/mentions.py)
+    allowed_mentions=DEFAULT_ALLOWED_MENTIONS,
+)
 
 
 @bot.event
 async def on_ready():
     logger.info(f"Бот {bot.user} запущен")
+    if not bot.startup_checked:
+        bot.startup_checked = True
+        # проверка заданных ID до обработки первой заявки (fail fast);
+        # не блокирует on_ready, чтобы не терять heartbeat
+        asyncio.create_task(check_startup(bot))
 
 
 @bot.event
@@ -83,4 +103,15 @@ if __name__ == "__main__":
         logger.critical("TOKEN не задан. Заполните .env по образцу .env.example")
         raise SystemExit(1)
 
+    if config.ALLOW_NAME_FALLBACK:
+        logger.warning(
+            "Включён ALLOW_NAME_FALLBACK — НЕБЕЗОПАСНЫЙ режим разработки: "
+            "объекты ищутся по имени, а проверки инфраструктуры не останавливают бота. "
+            "Никогда не используйте в production."
+        )
+
     bot.run(config.TOKEN)
+
+    # check_startup остановил бота из-за ошибочной конфигурации
+    if bot.startup_failed:
+        raise SystemExit(1)

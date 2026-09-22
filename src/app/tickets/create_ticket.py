@@ -6,9 +6,10 @@ from datetime import datetime
 import discord
 
 import config
-from database.tickets_db import get_open_ticket_for_user, save_ticket
+from database.tickets_db import add_log_message_id, get_open_ticket_for_user, save_ticket
 from utils.logcenter import LOG_KEY_TICKETS, send_to_log
 from utils.logger import logger
+from utils.mentions import mentions_for
 from utils.resolve import get_category, get_role
 
 from .views import FullTicketView
@@ -137,7 +138,7 @@ async def create_ticket(interaction, topic, ticket_type, inputs):
             # field value ограничен 1024 символами у Discord
             embed.add_field(name=label, value=(value or "—")[:1024], inline=False)
 
-        role_mentions = []
+        ping_roles = []
         for role_id, role_name in [
             (config.ROLE_RECRUITER_ID, config.ROLE_RECRUITER),
             (config.ROLE_OWNER_ID, config.ROLE_OWNER),
@@ -145,11 +146,16 @@ async def create_ticket(interaction, topic, ticket_type, inputs):
         ]:
             role = get_role(guild, role_id, role_name)
             if role:
-                role_mentions.append(role.mention)
+                ping_roles.append(role)
 
         await channel.send(embed=embed, view=FullTicketView())
-        if role_mentions:
-            await channel.send(f"{member.mention} {' '.join(role_mentions)}")
+        if ping_roles:
+            # служебный пинг рекрутёров: адресный AllowedMentions,
+            # массовые упоминания запрещены на уровне клиента
+            await channel.send(
+                f"{member.mention} {' '.join(role.mention for role in ping_roles)}",
+                allowed_mentions=mentions_for(users=[member], roles=ping_roles),
+            )
 
         log_embed = discord.Embed(
             title=f"📥 Новая заявка: {ticket_type}",
@@ -158,7 +164,10 @@ async def create_ticket(interaction, topic, ticket_type, inputs):
         )
         log_embed.add_field(name="Заявитель", value=member.mention, inline=True)
         log_embed.add_field(name="Тикет", value=channel.mention, inline=True)
-        await send_to_log(guild, LOG_KEY_TICKETS, embed=log_embed)
+        log_message = await send_to_log(guild, LOG_KEY_TICKETS, embed=log_embed)
+        if log_message is not None:
+            # связь с логом нужна, чтобы удаление данных стирало вложения
+            add_log_message_id(channel.id, log_message.channel.id, log_message.id)
 
         await interaction.edit_original_response(content=f"Заявка создана! {channel.mention}")
         logger.info(f"Заявка {ticket_type} создана для {member.name} в {channel.name}")

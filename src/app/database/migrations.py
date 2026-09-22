@@ -14,7 +14,7 @@ from sqlite3 import Connection
 
 from .db import get_db
 
-LATEST_SCHEMA_VERSION = 2
+LATEST_SCHEMA_VERSION = 3
 LEGACY_GUILD_ID = 0
 
 
@@ -379,7 +379,29 @@ def _create_afk_stats(conn: Connection) -> None:
     conn.execute("CREATE INDEX IF NOT EXISTS idx_afk_stats_guild ON afk_stats(guild_id)")
 
 
+def _migration_3_erasure_support(conn: Connection) -> None:
+    """Поддержка удаления данных и управляемого лог-центра.
+
+    tickets.log_message_ids — JSON-массив пар [thread_id, message_id]:
+    связь тикета с сообщениями лог-центра (в т.ч. транскриптами), чтобы
+    удаление персональных данных и ретенция могли стирать вложения.
+    bot_state — служебное key-value хранилище (ID объектов, созданных ботом).
+    """
+    cols = _columns(conn, "tickets")
+    if "log_message_ids" not in cols:
+        conn.execute("ALTER TABLE tickets ADD COLUMN log_message_ids TEXT")
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS bot_state (
+            key TEXT PRIMARY KEY,
+            value TEXT NOT NULL
+        )
+        """
+    )
+
+
 MIGRATIONS: tuple[tuple[int, Callable[[Connection], None]], ...] = (
     (1, _migration_1_initial_schema),
     (2, _migration_2_guild_scoped_data),
+    (3, _migration_3_erasure_support),
 )

@@ -1,7 +1,31 @@
+import importlib
+import os
 import unittest
 from unittest.mock import patch
 
 import config
+
+
+def reload_config_with(env):
+    """Перечитывает config с новым окружением и возвращает его после теста.
+
+    _ENV_ERRORS и значения *_ID разбираются при импорте модуля,
+    поэтому без reload изменение os.environ не видно.
+    """
+    return _ConfigReloader(env)
+
+
+class _ConfigReloader:
+    def __init__(self, env):
+        self.env = env
+
+    def __enter__(self):
+        with patch.dict(os.environ, self.env):
+            importlib.reload(config)
+
+    def __exit__(self, *args):
+        importlib.reload(config)
+        return False
 
 
 class TestConfig(unittest.TestCase):
@@ -176,6 +200,53 @@ class TestValidate(unittest.TestCase):
         for fields in (config.RP_FIELDS, config.CAPT_FIELDS):
             for label, *_ in fields:
                 self.assertLessEqual(len(label), 45, label)
+
+
+class TestEnvParsing(unittest.TestCase):
+    """Разбор .env: мусорные ID — ошибка старта, а не молчаливый None."""
+
+    def test_malformed_role_id_is_config_error(self):
+        with reload_config_with({"ROLE_RECRUITER_ID": "не-цифры"}):
+            errors = config.validate()
+        self.assertTrue(any("ROLE_RECRUITER_ID" in e for e in errors))
+
+    def test_malformed_voice_id_is_config_error(self):
+        with reload_config_with({"VOICE_CHANNEL_IDS": "123,abc,456"}):
+            errors = config.validate()
+        self.assertTrue(any("VOICE_CHANNEL_IDS" in e for e in errors))
+
+    def test_thread_ids_without_channel_id_is_config_error(self):
+        # ветка вне своего канала: приватность нечем гарантировать
+        with reload_config_with({"LOG_THREAD_AFK_ID": "123456789012345678"}):
+            errors = config.validate()
+        self.assertTrue(any("LOG_CHANNEL_ID" in e for e in errors))
+
+    def test_retention_days_default(self):
+        self.assertEqual(config.TICKET_RETENTION_DAYS, 180)
+        self.assertGreaterEqual(config.RETENTION_CHECK_SECONDS, 60)
+
+    def test_retention_days_zero_is_config_error(self):
+        with reload_config_with({"TICKET_RETENTION_DAYS": "0"}):
+            errors = config.validate()
+        self.assertTrue(any("TICKET_RETENTION_DAYS" in e for e in errors))
+
+    def test_malformed_retention_interval_is_config_error(self):
+        with reload_config_with({"RETENTION_CHECK_SECONDS": "ежедневно"}):
+            errors = config.validate()
+        self.assertTrue(any("RETENTION_CHECK_SECONDS" in e for e in errors))
+
+    def test_validate_clean_with_only_token(self):
+        errors = config.validate()
+        self.assertEqual(errors, [])
+
+
+class TestNameFallbackFlag(unittest.TestCase):
+    def test_fallback_disabled_by_default(self):
+        self.assertFalse(config.ALLOW_NAME_FALLBACK)
+
+    def test_fallback_enabled_by_env(self):
+        with reload_config_with({"ALLOW_NAME_FALLBACK": "true"}):
+            self.assertTrue(config.ALLOW_NAME_FALLBACK)
 
 
 if __name__ == "__main__":

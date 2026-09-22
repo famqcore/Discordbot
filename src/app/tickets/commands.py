@@ -2,16 +2,13 @@ import discord
 from discord.ext import commands
 
 import config
-from database.afk_db import delete_user_data as delete_afk_user_data
-from database.tickets_db import (
-    anonymize_user_tickets,
-    get_all_tickets,
-    get_open_ticket_for_user,
-    get_stats,
-)
+from database.tickets_db import get_all_tickets, get_open_ticket_for_user, get_stats
+from utils.logger import logger
+from utils.mentions import mentions_for
 from utils.ratelimit import retry_after
 
 from .create_ticket import TicketModal
+from .erasure import audit_erasure, erase_user_data
 
 
 class TicketTypeView(discord.ui.View):
@@ -79,6 +76,51 @@ class TicketTypeView(discord.ui.View):
         )
 
 
+class DeleteUserDataConfirmView(discord.ui.View):
+    """Подтверждение необратимого удаления персональных данных.
+
+    Реагирует только на администратора, вызвавшего команду.
+    """
+
+    def __init__(self, admin_id: int, member: discord.Member):
+        super().__init__(timeout=60)
+        self.admin_id = admin_id
+        self.member = member
+
+    async def _check_admin(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.admin_id:
+            await interaction.response.send_message(config.PRIVACY_DELETE_NOT_ADMIN, ephemeral=True)
+            return False
+        return True
+
+    @discord.ui.button(label=config.PRIVACY_DELETE_CONFIRM_BUTTON, style=discord.ButtonStyle.danger)
+    async def confirm(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not await self._check_admin(interaction):
+            return
+        # удаление — серия запросов к Discord, отвечаем отложенно
+        await interaction.response.defer()
+        try:
+            counts = await erase_user_data(interaction.guild, self.member)
+            await audit_erasure(interaction.guild, interaction.user, self.member, counts)
+            text = config.PRIVACY_DELETE_DONE.format(**counts)
+        except Exception as e:
+            logger.error(f"erasure: удаление данных {self.member.id} не завершилось: {e}")
+            text = config.PRIVACY_DELETE_FAILED
+        await interaction.edit_original_response(
+            content=text, view=None, allowed_mentions=mentions_for()
+        )
+        self.stop()
+
+    @discord.ui.button(
+        label=config.PRIVACY_DELETE_CANCEL_BUTTON, style=discord.ButtonStyle.secondary
+    )
+    async def cancel(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not await self._check_admin(interaction):
+            return
+        await interaction.response.edit_message(content=config.PRIVACY_DELETE_CANCELLED, view=None)
+        self.stop()
+
+
 class TicketsCog(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
@@ -144,15 +186,12 @@ class TicketsCog(commands.Cog):
     @commands.has_permissions(administrator=True)
     @commands.cooldown(2, config.AFK_LOOKUP_COOLDOWN_SECONDS, commands.BucketType.user)
     async def delete_user_data(self, ctx: commands.Context, member: discord.Member):
-        ticket_count = anonymize_user_tickets(ctx.guild.id, member.id)
-        afk_counts = delete_afk_user_data(member.id, ctx.guild.id)
+        """Необратимое удаление данных пользователя (требует подтверждения)."""
+        view = DeleteUserDataConfirmView(ctx.author.id, member)
         await ctx.send(
-            config.PRIVACY_DELETE_DONE.format(
-                tickets=ticket_count,
-                afk_users=afk_counts["afk_users"],
-                afk_stats=afk_counts["afk_stats"],
-                afk_cooldown=afk_counts["afk_cooldown"],
-            )
+            config.PRIVACY_DELETE_CONFIRM.format(member=f"{member.mention} (ID {member.id})"),
+            view=view,
+            allowed_mentions=mentions_for(),
         )
 
 
