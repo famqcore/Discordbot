@@ -1,0 +1,5 @@
+blank_issues_enabled: true
+contact_links:
+  - name: 💬 Вопрос или идея
+    url: https://github.com/famqcore/Discordbot/issues
+    about: Для вопросов и предложений создайте Issue с кратким описанием сценария.
