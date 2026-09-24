@@ -98,8 +98,9 @@ class DecisionReasonModal(discord.ui.Modal):
             # чтобы из решения нельзя было собрать массовый пинг
             reason = escape_user_text(self.reason.value)
 
-            await _notify_applicant(applicant, decision, reason)
-            await _announce_in_channel(self.channel, decision, mention, reason, applicant)
+            async def notify_applicant_and_channel() -> None:
+                await _notify_applicant(applicant, decision, reason)
+                await _announce_in_channel(self.channel, decision, mention, reason, applicant)
 
             embed = discord.Embed(
                 title=decision.embed_title,
@@ -117,6 +118,7 @@ class DecisionReasonModal(discord.ui.Modal):
                 actor=interaction.user,
                 reason=self.reason.value,
                 embed=embed,
+                after_finalize=notify_applicant_and_channel,
             )
 
             if not outcome.ok:
@@ -128,7 +130,7 @@ class DecisionReasonModal(discord.ui.Modal):
 
 
 async def _notify_applicant(applicant, decision: Decision, reason: str) -> None:
-    """Заявитель узнаёт о решении до того, как канал исчезнет."""
+    """Уведомляет заявителя о уже зафиксированном решении до удаления канала."""
     if applicant is None:
         return
     try:

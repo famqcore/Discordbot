@@ -46,8 +46,6 @@ class CloseButton(discord.ui.Button):
             # отвечаем сразу: дальше канал удалится и отвечать будет некуда
             await interaction.response.send_message("Тикет закрывается...", ephemeral=True)
 
-            await _notify_applicant(guild, ticket)
-
             embed = discord.Embed(
                 title=config.TICKET_CLOSED_LOG_TITLE,
                 color=discord.Color.dark_grey(),
@@ -62,6 +60,7 @@ class CloseButton(discord.ui.Button):
                 actor=interaction.user,
                 reason=None,
                 embed=embed,
+                after_finalize=lambda: _notify_applicant(guild, ticket),
             )
 
             if not outcome.ok:

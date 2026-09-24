@@ -24,6 +24,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 
 import discord
@@ -66,9 +67,15 @@ async def complete_terminal_action(
     actor,
     reason: str | None,
     embed: discord.Embed,
+    after_finalize: Callable[[], Awaitable[None]] | None = None,
     delete_channel: bool = True,
 ) -> TerminalOutcome:
-    """Выполняет шаги 3–6 для уже захваченной заявки."""
+    """Выполняет шаги 3–6 для уже захваченной заявки.
+
+    ``after_finalize`` предназначен для внешних уведомлений. Он вызывается
+    только после успешной фиксации статуса и до удаления канала: откат
+    подготовки не оставит у заявителя ложного DM или объявления.
+    """
     channel_id = getattr(channel, "id", None)
     correlation_id = new_correlation_id()
     actor_id = getattr(actor, "id", None)
@@ -137,6 +144,15 @@ async def complete_terminal_action(
             reason=config.TICKET_ALREADY_DECIDED,
             correlation_id=correlation_id,
         )
+
+    if after_finalize is not None:
+        try:
+            await after_finalize()
+        except Exception as error:  # noqa: BLE001 - финализация уже состоялась
+            logger.exception(
+                f"ticket.terminal outcome=notify_failed status={status} channel_id={channel_id} "
+                f"error_type={type(error).__name__} correlation_id={correlation_id}"
+            )
 
     if delete_channel:
         await _delete_channel(channel, status, actor, correlation_id)

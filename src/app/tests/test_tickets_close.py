@@ -165,6 +165,7 @@ class CloseButtonTestCase(TerminalActionTestCase):
             await CloseButton().callback(interaction)
 
         mock_log.assert_not_awaited()
+        self.applicant.send.assert_not_awaited()
         self.channel.delete.assert_not_awaited()
         self.assertEqual(self.ticket()["status"], STATUS_OPEN)
         interaction.followup.send.assert_awaited_once()
@@ -301,6 +302,21 @@ class DecisionTestCase(TerminalActionTestCase):
             await self.modal().on_submit(interaction)
 
         self.assertEqual(self.ticket()["status"], STATUS_ACCEPTED)
+
+    async def test_retryable_log_error_does_not_notify_about_reverted_decision(self):
+        interaction = self.interaction()
+
+        with patch(
+            "tickets.workflow.send_to_log",
+            new_callable=AsyncMock,
+            side_effect=http_exception(503),
+        ):
+            await self.modal().on_submit(interaction)
+
+        self.assertEqual(self.ticket()["status"], STATUS_OPEN)
+        self.applicant.send.assert_not_awaited()
+        self.channel.send.assert_not_awaited()
+        self.channel.delete.assert_not_awaited()
 
 
 class WorkflowStateTestCase(TerminalActionTestCase):
