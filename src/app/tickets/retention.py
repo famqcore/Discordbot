@@ -35,15 +35,23 @@ from utils.logger import logger
 async def _purge_ticket(bot, ticket) -> bool:
     """Удаляет один тикет и связанный контент. True — запись БД удалена."""
     guild = bot.get_guild(ticket["guild_id"])
+    if guild is None:
+        # Без сервера нельзя удалить логи и вложенный транскрипт. Запись
+        # сохраняет ссылки до следующего прохода, когда Discord станет доступен.
+        logger.warning(
+            f"retention outcome=deferred ticket_id={ticket['id']} "
+            f"guild_id={ticket['guild_id']} reason=guild_unavailable"
+        )
+        return False
+
     try:
-        if guild is not None:
-            if ticket["status"] in ACTIVE_STATUSES:
-                channel = guild.get_channel(ticket["channel_id"])
-                if channel is not None:
-                    await channel.delete(reason="Ретенция: заявка старше срока хранения")
-            refs = tickets_db.parse_log_message_refs(ticket["log_message_ids"])
-            if refs:
-                await delete_log_messages(guild, refs)
+        if ticket["status"] in ACTIVE_STATUSES:
+            channel = guild.get_channel(ticket["channel_id"])
+            if channel is not None:
+                await channel.delete(reason="Ретенция: заявка старше срока хранения")
+        refs = tickets_db.parse_log_message_refs(ticket["log_message_ids"])
+        if refs:
+            await delete_log_messages(guild, refs)
         return await tickets_db.async_delete_ticket_by_id(ticket["id"])
     except (discord.Forbidden, discord.HTTPException, sqlite3.Error) as error:
         logger.exception(

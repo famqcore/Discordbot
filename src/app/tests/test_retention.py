@@ -221,15 +221,17 @@ class PurgeExpiredTestCase(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(purged, 1)
 
-    async def test_unknown_guild_row_still_purged(self):
-        """Бота выгнали с сервера: запись всё равно должна уйти по сроку."""
+    async def test_unknown_guild_defers_purge_until_linked_logs_are_reachable(self):
         self._save_closed(100, closed_days=config.TICKET_RETENTION_DAYS + 10, guild_id=999)
+        tickets_db.add_log_message_id(100, 900, 500)
 
-        with patch("tickets.retention.send_to_log", new_callable=AsyncMock):
-            purged = await purge_expired_once(self.bot)
+        with patch("tickets.retention.delete_log_messages", new_callable=AsyncMock) as mock_logs:
+            with patch("tickets.retention.send_to_log", new_callable=AsyncMock):
+                purged = await purge_expired_once(self.bot)
 
-        self.assertEqual(purged, 1)
-        self.assertIsNone(tickets_db.get_ticket(100))
+        self.assertEqual(purged, 0)
+        self.assertIsNotNone(tickets_db.get_ticket(100))
+        mock_logs.assert_not_awaited()
 
 
 class RetentionCogLifecycleTestCase(unittest.IsolatedAsyncioTestCase):
