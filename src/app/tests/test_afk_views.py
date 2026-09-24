@@ -305,7 +305,9 @@ class TestAfkReturnViewButtons(unittest.IsolatedAsyncioTestCase):
         interaction.response.edit_message = AsyncMock()
 
         session = {"duration_seconds": 3600, "original_nick": "Вася", "nick_applied": 1}
-        with patch("afk.views.async_take_afk_session", new_callable=AsyncMock, return_value=session):
+        with patch(
+            "afk.views.async_take_afk_session", new_callable=AsyncMock, return_value=session
+        ):
             with patch("afk.views.remove_afk_nickname", new_callable=AsyncMock) as mock_nick:
                 with patch("afk.views.send_to_log", new_callable=AsyncMock):
                     await view.confirm.callback(interaction)
@@ -415,7 +417,9 @@ class TestAfkSetModalSubmit(unittest.IsolatedAsyncioTestCase):
 
         with patch("afk.views.async_get_afk_user", new_callable=AsyncMock, return_value=None):
             with patch(
-                "afk.views.async_set_afk", new_callable=AsyncMock, return_value=AfkSetResult(created=True)
+                "afk.views.async_set_afk",
+                new_callable=AsyncMock,
+                return_value=AfkSetResult(created=True),
             ) as mock_set:
                 with patch("afk.views.add_afk_nickname", new_callable=AsyncMock, return_value=True):
                     with patch("afk.views.send_to_log", new_callable=AsyncMock):
@@ -440,7 +444,9 @@ class TestAfkSetModalSubmit(unittest.IsolatedAsyncioTestCase):
 
         with patch("afk.views.async_get_afk_user", new_callable=AsyncMock, return_value=None):
             with patch(
-                "afk.views.async_set_afk", new_callable=AsyncMock, return_value=AfkSetResult(created=True)
+                "afk.views.async_set_afk",
+                new_callable=AsyncMock,
+                return_value=AfkSetResult(created=True),
             ) as mock_set:
                 with patch("afk.views.add_afk_nickname", new_callable=AsyncMock, return_value=True):
                     with patch("afk.views.send_to_log", new_callable=AsyncMock):

@@ -72,7 +72,9 @@ class TestDatabaseClose(unittest.TestCase):
         with patch.object(db_module, "logger") as mock_logger:
             database.close()
 
-        mock_logger.warning.assert_called_once_with("database.close outcome=timeout timeout_seconds=10")
+        mock_logger.warning.assert_called_once_with(
+            "database.close outcome=timeout timeout_seconds=10"
+        )
         executor.shutdown.assert_called_once_with(wait=True)
 
 

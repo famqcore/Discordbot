@@ -53,8 +53,12 @@ class AfkAutoReplyPingSafetyTestCase(unittest.IsolatedAsyncioTestCase):
             "afk_reason": reason,
             "afk_since": clock.to_db(clock.shift(clock.utcnow(), minutes=-10)),
         }
-        with patch("afk.events.async_get_afk_users", new_callable=AsyncMock, return_value={200: row}):
-            with patch("afk.events.async_check_and_reply", new_callable=AsyncMock, return_value=True):
+        with patch(
+            "afk.events.async_get_afk_users", new_callable=AsyncMock, return_value={200: row}
+        ):
+            with patch(
+                "afk.events.async_check_and_reply", new_callable=AsyncMock, return_value=True
+            ):
                 await self.cog.on_message(message)
         return message, target
 
@@ -110,7 +114,11 @@ class AfkSetModalPingSafetyTestCase(unittest.IsolatedAsyncioTestCase):
 
         interaction = FakeInteraction(user=member, guild=guild)
 
-        with patch("afk.views.async_set_afk", new_callable=AsyncMock, return_value=AfkSetResult(created=True)):
+        with patch(
+            "afk.views.async_set_afk",
+            new_callable=AsyncMock,
+            return_value=AfkSetResult(created=True),
+        ):
             with patch("afk.views.async_get_afk_user", new_callable=AsyncMock, return_value=None):
                 with patch("afk.views.add_afk_nickname", new_callable=AsyncMock, return_value=True):
                     with patch("afk.views.send_to_log", new_callable=AsyncMock):
@@ -131,7 +139,11 @@ class AfkSetModalPingSafetyTestCase(unittest.IsolatedAsyncioTestCase):
         modal.duration = MagicMock(value="1 час")
         interaction = FakeInteraction(user=member, guild=guild)
 
-        with patch("afk.views.async_set_afk", new_callable=AsyncMock, return_value=AfkSetResult(created=True)):
+        with patch(
+            "afk.views.async_set_afk",
+            new_callable=AsyncMock,
+            return_value=AfkSetResult(created=True),
+        ):
             with patch("afk.views.async_get_afk_user", new_callable=AsyncMock, return_value=None):
                 with patch("afk.views.add_afk_nickname", new_callable=AsyncMock, return_value=True):
                     with patch("afk.views.send_to_log", new_callable=AsyncMock) as mock_log:
@@ -217,7 +229,11 @@ class CreateTicketServicePingTestCase(unittest.IsolatedAsyncioTestCase):
         with patch("tickets.create_ticket.get_role", side_effect=fake_get_role):
             with patch("tickets.create_ticket.get_category", return_value=MagicMock()):
                 with patch("tickets.create_ticket.async_save_ticket"):
-                    with patch("tickets.create_ticket.async_get_open_ticket_for_user", new_callable=AsyncMock, return_value=None):
+                    with patch(
+                        "tickets.create_ticket.async_get_open_ticket_for_user",
+                        new_callable=AsyncMock,
+                        return_value=None,
+                    ):
                         with patch(
                             "tickets.create_ticket.send_to_log",
                             new_callable=AsyncMock,

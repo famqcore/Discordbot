@@ -86,13 +86,17 @@ class DecisionReasonModal(discord.ui.Modal):
         ):
             ticket = await ticket_for_channel(channel_id, guild_id)
             if ticket is None:
-                await interaction.response.send_message(config.TICKET_ALREADY_DECIDED, ephemeral=True)
+                await interaction.response.send_message(
+                    config.TICKET_ALREADY_DECIDED, ephemeral=True
+                )
                 return
 
             # Захват заявки: из накликанных accept/deny/close побеждает ровно один.
             claimed = await claim_ticket(channel_id, decision.status, guild_id)
             if not claimed:
-                await interaction.response.send_message(config.TICKET_ALREADY_DECIDED, ephemeral=True)
+                await interaction.response.send_message(
+                    config.TICKET_ALREADY_DECIDED, ephemeral=True
+                )
                 return
 
             try:

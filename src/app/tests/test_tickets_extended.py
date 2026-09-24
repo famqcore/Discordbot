@@ -361,7 +361,11 @@ class CreateTicketErrorsTestCase(unittest.IsolatedAsyncioTestCase):
 
     async def test_db_failure_removes_created_channel(self):
         """Если запись не сохранилась, канал не остаётся сиротой."""
-        with patch("tickets.create_ticket.async_save_ticket", new_callable=AsyncMock, side_effect=sqlite3.OperationalError("x")):
+        with patch(
+            "tickets.create_ticket.async_save_ticket",
+            new_callable=AsyncMock,
+            side_effect=sqlite3.OperationalError("x"),
+        ):
             result = await self._create()
 
         self.assertIsNone(result)
@@ -378,7 +382,8 @@ class CreateTicketErrorsTestCase(unittest.IsolatedAsyncioTestCase):
             side_effect=[None, {"channel_id": 999}],
         ):
             with patch(
-                "tickets.create_ticket.async_save_ticket", side_effect=sqlite3.IntegrityError("unique")
+                "tickets.create_ticket.async_save_ticket",
+                side_effect=sqlite3.IntegrityError("unique"),
             ):
                 result = await self._create()
 

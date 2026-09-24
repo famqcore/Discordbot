@@ -42,12 +42,16 @@ class CloseButton(discord.ui.Button):
             ticket = await ticket_for_channel(channel_id, guild_id)
             if ticket is None:
                 # кнопка нажата в канале, который не является тикетом этого сервера
-                await interaction.response.send_message(config.TICKET_ALREADY_DECIDED, ephemeral=True)
+                await interaction.response.send_message(
+                    config.TICKET_ALREADY_DECIDED, ephemeral=True
+                )
                 return
 
             claimed = await claim_ticket(channel_id, STATUS_CLOSED, guild_id)
             if not claimed:
-                await interaction.response.send_message(config.TICKET_ALREADY_DECIDED, ephemeral=True)
+                await interaction.response.send_message(
+                    config.TICKET_ALREADY_DECIDED, ephemeral=True
+                )
                 return
 
             try:
