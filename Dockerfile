@@ -1,5 +1,11 @@
 # Multi-platform manifest pinned on 2026-09-24; see docs/deployment.md for updates.
-FROM python:3.14.7-slim-bookworm@sha256:82bc3c539b8813ada9d68c63b40158fa002f7f33de9bf3312a3dfdc0620dff56
+# Ветка Python зафиксирована на 3.11: requirements.txt/requirements-dev.txt
+# хэш-залочены под cp311-артефакты (pip-compile под Python 3.11), поэтому
+# прыжок базового образа на другую ветку Python ломает
+# `pip install --require-hashes` — сборка образа падает в CI.
+# Переход на новую ветку Python — только вместе с перегенерацией обоих
+# lock-файлов и python-version в tests.yml (см. docs/deployment.md).
+FROM python:3.11.16-slim-bookworm@sha256:a36c24f9cbdf4fd0f52d67f0823eeac19c2028c637cecc392d97f980d4fec56b
 
 ARG APP_UID=10001
 ARG APP_GID=10001

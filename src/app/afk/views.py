@@ -21,6 +21,7 @@ from .models import (
     format_duration,
     remove_afk_nickname,
     session_duration,
+    strip_afk_prefix,
 )
 
 __all__ = [
@@ -176,9 +177,15 @@ class AfkSetModal(discord.ui.Modal, title=config.AFK_MODAL_TITLE):
                 return
 
             # исходный ник фиксируется только при старте новой сессии:
-            # повторная установка AFK не должна запомнить ник с префиксом
+            # повторная установка AFK не должна запомнить ник с префиксом.
+            # Если сессии в БД уже нет, а ник всё ещё с «[AFK] » (прошлая
+            # сессия потерялась после смены ника), префикс срезается —
+            # иначе он запечётся в original_nick и останется навсегда
             existing = await async_get_afk_user(self.member.id, self.guild_id)
-            original_nick = existing["original_nick"] if existing else self.member.nick
+            if existing:
+                original_nick = existing["original_nick"]
+            else:
+                original_nick = strip_afk_prefix(self.member.nick)
 
             # Сначала меняем ник, затем сохраняем его результат вместе с
             # новой сессией. Отдельный mark после редактирования оставлял
