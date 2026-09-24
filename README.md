@@ -30,7 +30,7 @@
 ```bash
 git clone https://github.com/famqcore/Discordbot.git
 cd Discordbot/src/app
-python -m pip install -r requirements.txt
+python -m pip install --require-hashes -r requirements.txt
 cp .env.example .env
 # Откройте .env и добавьте токен Discord-бота
 python main.py

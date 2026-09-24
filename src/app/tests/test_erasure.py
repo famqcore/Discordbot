@@ -195,6 +195,20 @@ class TestDeleteUserDataConfirmation(unittest.IsolatedAsyncioTestCase):
         self.assertIsInstance(kwargs["view"], DeleteUserDataConfirmView)
         self.assertEqual(kwargs["allowed_mentions"].users, [])
         self.assertEqual(kwargs["allowed_mentions"].roles, [])
+        self.assertIs(kwargs["view"].message, ctx.send.return_value)
+
+    async def test_confirmation_timeout_marks_message_expired(self):
+        member = MagicMock(id=42)
+        view = DeleteUserDataConfirmView(99, member)
+        view.message = MagicMock()
+        view.message.edit = AsyncMock()
+
+        await view.on_timeout()
+
+        view.message.edit.assert_awaited_once_with(
+            content=config.PRIVACY_DELETE_EXPIRED,
+            view=None,
+        )
 
     async def test_confirm_erases_and_reports(self):
         member = MagicMock()

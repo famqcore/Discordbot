@@ -72,6 +72,25 @@ class AfkReturnView(discord.ui.View):
         self.member = member
         self.guild_id = guild_id
         self.duration_text = duration_text
+        self._original_interaction: discord.Interaction | None = None
+
+    def bind_original_response(self, interaction: discord.Interaction) -> None:
+        """Сохраняет interaction, чтобы отредактировать ephemeral-ответ по таймауту."""
+        self._original_interaction = interaction
+
+    async def on_timeout(self) -> None:
+        """Убирает просроченные кнопки, не меняя AFK-статус."""
+        if self._original_interaction is None:
+            return
+        try:
+            await self._original_interaction.edit_original_response(
+                content=config.AFK_RETURN_EXPIRED,
+                embed=None,
+                view=None,
+            )
+        except discord.HTTPException:
+            # Ephemeral interaction уже удалён или его token недействителен.
+            pass
 
     @discord.ui.button(label=config.AFK_BUTTON_RETURN, style=discord.ButtonStyle.success)
     async def confirm(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -269,6 +288,7 @@ class AfkMenuView(discord.ui.View):
             )
             view = AfkReturnView(interaction.user, interaction.guild_id, duration_text)
             await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
+            view.bind_original_response(interaction)
 
     @discord.ui.button(
         label=config.AFK_BUTTON_REFRESH,

@@ -1,72 +1,101 @@
-# Тесты и линтер
+# Тесты, coverage и линтер
+
+## Установка проверяемого окружения
+
+Runtime- и dev-зависимости закреплены с SHA-256-хешами. Для разработки нужен именно dev lock:
+
+```bash
+python -m venv .venv
+. .venv/bin/activate
+python -m pip install --require-hashes -r src/app/requirements-dev.txt
+```
+
+`requirements.in` и `requirements-dev.in` — входные ограничения для обновления, а `requirements.txt` и `requirements-dev.txt` — воспроизводимые lock-файлы. Не редактируйте версии и хеши в lock-файлах вручную.
 
 ## Запуск тестов
 
+Полный быстрый прогон:
+
 ```bash
 cd src/app
-TOKEN=dummy python -m unittest discover -s tests -v
+TOKEN=dummy PYTHONWARNINGS=error python -m unittest discover -s tests -t . -v
 ```
 
-Переменная `TOKEN` нужна: один тест проверяет, что токен задан, поэтому для прогона достаточно любого фиктивного значения. Набор unittest выполняется за несколько секунд.
+`-t .` важен: тесты импортируются как пакет `tests`, поэтому до первого `import discord` включается политика warnings-as-errors. Единственное временное исключение для стороннего `audioop` имеет владельца и срок пересмотра в `tests/__init__.py`. Любой новый `RuntimeWarning` или `DeprecationWarning`, включая `coroutine was never awaited`, делает прогон красным.
 
-Тесты запускаются локально этой командой и автоматически в GitHub Actions. Production-процесс `python main.py` тесты не запускает.
+CI делит набор на непересекающиеся группы, которые можно запустить отдельно:
+
+```bash
+python -m tests.run_suite unit        # быстрые unit/contract tests
+python -m tests.run_suite integration # связки модулей, reconcile и retention
+python -m tests.run_suite migration   # миграции и lifecycle соединения БД
+```
+
+Переменная `TOKEN` нужна только потому, что тесты проверяют обязательность токена; подходит фиктивное значение. Реальная сеть Discord не используется.
+
+## Coverage
+
+Локальный эквивалент CI:
+
+```bash
+cd src/app
+coverage erase
+TOKEN=dummy PYTHONWARNINGS=error coverage run --parallel-mode -m tests.run_suite unit
+TOKEN=dummy PYTHONWARNINGS=error coverage run --parallel-mode -m tests.run_suite integration
+TOKEN=dummy PYTHONWARNINGS=error coverage run --parallel-mode -m tests.run_suite migration
+coverage combine
+coverage report --fail-under=85
+coverage report --include='afk/*,database/*,tickets/*' --fail-under=85
+coverage xml
+```
+
+CI требует минимум **85% branch coverage** и для всего приложения, и отдельно для критических доменных/DB-модулей `afk`, `database`, `tickets`. XML-отчёт публикуется как workflow artifact на 14 дней.
 
 ## Что покрыто
 
-Тесты на unittest + mock, без реального Discord. Разложены по модулям, имя файла говорит само за себя:
+Тесты используют `unittest`, async-фейки и временную SQLite без реального Discord:
 
-| Файл | Что проверяет |
-|------|---------------|
-| `test_config.py` | Целостность настроек и текстов |
-| `test_database.py`, `test_afk_database.py`, `test_db_connection.py` | CRUD на временной базе |
-| `test_tickets*.py`, `test_commands.py` | Формы, кнопки, создание и решение по тикетам |
-| `test_afk_*.py` | Модели, команды, события, кнопки AFK |
-| `test_logger*.py` | Формат и запись логов |
-| `test_main.py` | Запуск, setup_hook, обработчик ошибок команд |
-| `test_integration.py` | Связки модулей вместе |
+| Файлы | Что проверяют |
+|---|---|
+| `test_config.py` | Разбор, нормализацию и валидацию настроек |
+| `test_database.py`, `test_afk_database.py`, `test_db_connection.py` | CRUD, транзакции и lifecycle SQLite |
+| `test_migrations.py` | Preflight, backup и миграции схемы |
+| `test_tickets*.py`, `test_commands.py` | Формы, Discord-контракты, гонки и lifecycle тикетов |
+| `test_afk_*.py` | Модели, команды, события, таймауты UI и фоновые задачи AFK |
+| `test_logcenter.py` | Приватность, доставка, архив и конкурентное создание веток |
+| `test_integration.py`, `test_reconcile.py`, `test_retention.py` | Межмодульные и отказоустойчивые сценарии |
 
-Тестовая база - временный файл: тесты подменяют `config.DB_PATH`, восстанавливают его после выполнения и не трогают боевой `database.db`.
+`tests/support.py` содержит контрактные async-фейки: корутинные методы представлены `AsyncMock`, acknowledgement interaction отслеживается, `allowed_mentions` и Discord permissions проверяются явно. Обычный `MagicMock` вместо awaitable запрещён политикой предупреждений.
 
-## Линтер и форматтер
+## Ruff
 
-Установка один раз:
-
-```bash
-pip install ruff
-```
-
-Проверки той же конфигурацией, что в репозитории (`pyproject.toml`):
+Проверки используют версию из dev lock и конфигурацию `pyproject.toml`:
 
 ```bash
-ruff check .
-ruff format --check .
+ruff check src/app
+ruff format --check src/app
 ```
 
-Автофикс и форматирование:
+Автоисправление:
 
 ```bash
-ruff check --fix .
-ruff format .
+ruff check --fix src/app
+ruff format src/app
 ```
-
-Набор правил намеренно базовый (E, W, F, I, UP, B, C4). Более строгие правила про наивные даты и голые except будем включать по мере разгребания соответствующих issues - иначе линтер будет красным на уже известных задачах.
 
 ## Pre-commit
 
-Можно не помнить команды - поставьте хуки:
-
 ```bash
-pip install pre-commit
+python -m pip install pre-commit
 pre-commit install
 ```
 
-Теперь ruff и базовые проверки (хвостовые пробелы, конец файла, YAML) срабатывают сами на каждый коммит.
+Хуки проверяют Ruff, хвостовые пробелы, конец файла и YAML до коммита.
 
 ## Правила для новых тестов
 
-- Один тест - одна проверка, имя теста говорит, что сломалось бы.
-- Discord-объекты всегда мокаются, сети в тестах нет.
-- Базу подменять на временный файл, как в `test_database.py`.
-- Тесты не должны зависеть друг от друга и от порядка запуска.
-
-Тесты при старте бота больше не запускаются (`python main.py` просто стартует бота) — тесты гоняет CI на каждый пуш и PR, локально всё по-прежнему запускается этой же командой.
+- Один тест — один наблюдаемый инвариант, а не только факт вызова mock-метода.
+- Для Discord API используйте async-фейки из `tests/support.py` и проверяйте interaction acknowledgement, permissions и `allowed_mentions`.
+- Для БД используйте временный путь через `use_temp_database`; боевой `database.db` тесты не трогают.
+- Для каждой исправленной гонки, P0/P1 или data-integrity ошибки нужен regression test.
+- Новый тестовый модуль автоматически попадает в unit-группу; если это integration/migration suite, добавьте его в соответствующий набор `tests/run_suite.py`.

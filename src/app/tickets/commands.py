@@ -84,6 +84,19 @@ class DeleteUserDataConfirmView(discord.ui.View):
         super().__init__(timeout=config.DELETE_USER_DATA_CONFIRM_TIMEOUT_SECONDS)
         self.admin_id = admin_id
         self.member = member
+        self.message: discord.Message | None = None
+
+    async def on_timeout(self) -> None:
+        """Убирает опасные кнопки и явно сообщает, что удаления не было."""
+        if self.message is None:
+            return
+        try:
+            await self.message.edit(content=config.PRIVACY_DELETE_EXPIRED, view=None)
+        except discord.HTTPException as error:
+            logger.warning(
+                "erasure.confirmation outcome=timeout_edit_failed "
+                f"error_type={type(error).__name__}"
+            )
 
     async def _check_admin(self, interaction: discord.Interaction) -> bool:
         if interaction.user.id != self.admin_id:
@@ -217,7 +230,7 @@ class TicketsCog(commands.Cog):
     async def delete_user_data(self, ctx: commands.Context, member: discord.Member):
         """Необратимое удаление данных пользователя (требует подтверждения)."""
         view = DeleteUserDataConfirmView(ctx.author.id, member)
-        await ctx.send(
+        view.message = await ctx.send(
             config.PRIVACY_DELETE_CONFIRM.format(member=f"{member.mention} (ID {member.id})"),
             view=view,
             allowed_mentions=mentions_for(),

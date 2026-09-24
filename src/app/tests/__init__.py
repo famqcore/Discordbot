@@ -17,4 +17,5 @@ warnings.simplefilter("error", DeprecationWarning)
 warnings.simplefilter("error", RuntimeWarning)
 
 # Третья сторона: discord.player -> import audioop (удалён в Python 3.13).
+# Временное исключение: owner @famqcore, срок пересмотра 2026-12-31.
 warnings.filterwarnings("ignore", message=r".*audioop.*")

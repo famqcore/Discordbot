@@ -174,6 +174,14 @@ class VoiceCallTestCase(unittest.IsolatedAsyncioTestCase):
 
         interaction.response.send_message.assert_awaited_once()
         self.assertIn("view", interaction.response.send_message.await_args.kwargs)
+        view = interaction.response.send_message.await_args.kwargs["view"]
+
+        await view.on_timeout()
+
+        interaction.edit_original_response.assert_awaited_once_with(
+            content=config.VOICE_SELECT_EXPIRED,
+            view=None,
+        )
 
     async def test_regular_member_denied(self):
         member = FakeMember(user_id=42)

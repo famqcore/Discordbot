@@ -270,6 +270,16 @@ class TestEnvParsing(unittest.TestCase):
         errors = config.validate()
         self.assertEqual(errors, [])
 
+    def test_token_whitespace_is_stripped(self):
+        with reload_config_with({"TOKEN": "  secret-token\n"}):
+            self.assertEqual(config.TOKEN, "secret-token")
+
+    def test_whitespace_only_token_is_missing(self):
+        with reload_config_with({"TOKEN": " \t\n "}):
+            self.assertIsNone(config.TOKEN)
+            errors = config.validate(require_token=True)
+        self.assertTrue(any("TOKEN не задан" in error for error in errors))
+
 
 class TestNameFallbackFlag(unittest.TestCase):
     def test_fallback_disabled_by_default(self):

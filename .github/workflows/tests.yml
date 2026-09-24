@@ -1,27 +1,38 @@
-name: tests
+name: quality-and-security
 
 on:
   push:
   pull_request:
 
+permissions:
+  contents: read
+
+concurrency:
+  group: quality-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
-  test:
+  quality:
+    name: Lint, tests and coverage
     runs-on: ubuntu-latest
     defaults:
       run:
         working-directory: src/app
+    env:
+      TOKEN: ci-test-token
+      PYTHONWARNINGS: error
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
         with:
-          python-version: "3.11"
+          python-version: "3.11.16"
+          cache: pip
+          cache-dependency-path: src/app/requirements-dev.txt
 
-      - name: Install dependencies
-        run: |
-          python -m pip install --upgrade pip
-          pip install -r requirements.txt ruff==0.6.9
+      - name: Install hash-locked development dependencies
+        run: python -m pip install --require-hashes -r requirements-dev.txt
 
       - name: Ruff lint
         run: ruff check .
@@ -29,7 +40,80 @@ jobs:
       - name: Ruff format
         run: ruff format --check .
 
-      - name: Unit tests
-        env:
-          TOKEN: ci-test-token
-        run: python -m unittest discover -s tests
+      - name: Fast unit tests
+        run: coverage run --parallel-mode -m tests.run_suite unit
+
+      - name: Integration tests
+        run: coverage run --parallel-mode -m tests.run_suite integration
+
+      - name: Migration and database lifecycle tests
+        run: coverage run --parallel-mode -m tests.run_suite migration
+
+      - name: Enforce coverage thresholds
+        run: |
+          coverage combine
+          coverage report --fail-under=85
+          coverage report --include='afk/*,database/*,tickets/*' --fail-under=85
+          coverage xml
+
+      - name: Upload coverage report
+        uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5.0.0
+        with:
+          name: coverage-xml
+          path: src/app/coverage.xml
+          if-no-files-found: error
+          retention-days: 14
+
+  supply-chain:
+    name: Dependency and container security
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+        with:
+          python-version: "3.11.16"
+          cache: pip
+          cache-dependency-path: src/app/requirements-dev.txt
+
+      - name: Install hash-locked audit tooling
+        working-directory: src/app
+        run: python -m pip install --require-hashes -r requirements-dev.txt
+
+      - name: Audit Python dependencies
+        working-directory: src/app
+        run: pip-audit --strict --require-hashes --progress-spinner=off -r requirements.txt
+
+      - name: Build production image
+        run: docker build --tag local/famqcore-bot:${{ github.sha }} .
+
+      - name: Verify non-root runtime user
+        run: |
+          test "$(docker image inspect --format '{{.Config.User}}' local/famqcore-bot:${{ github.sha }})" = "bot:bot"
+
+      - name: Generate SPDX SBOM
+        uses: anchore/sbom-action@3ad7283483fc7af8ff2b4ea19663c2d5ca935e26 # v0.24.2
+        with:
+          image: local/famqcore-bot:${{ github.sha }}
+          format: spdx-json
+          output-file: sbom.spdx.json
+          upload-artifact: false
+          upload-release-assets: false
+
+      - name: Publish SBOM artifact
+        uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5.0.0
+        with:
+          name: production-sbom-spdx
+          path: sbom.spdx.json
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Fail on actionable critical container vulnerabilities
+        uses: anchore/scan-action@27805bf3b4e84b4a5c980df22ed233c00390a439 # v7.4.2
+        with:
+          image: local/famqcore-bot:${{ github.sha }}
+          fail-build: true
+          severity-cutoff: critical
+          only-fixed: true
+          output-format: table

@@ -1,3 +1,4 @@
+import asyncio
 import unittest
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -358,6 +359,47 @@ class TestManagedLogCenter(unittest.IsolatedAsyncioTestCase):
 
         self.assertIsNotNone(result)
         guild.create_text_channel.assert_awaited_once()
+
+
+class TestConcurrentThreadResolution(unittest.IsolatedAsyncioTestCase):
+    async def test_parallel_first_send_creates_one_thread(self):
+        guild = make_guild()
+        channel = make_channel(guild)
+        created = make_thread(guild, channel, thread_id=200, name="🔴-afk")
+        guild.get_channel = MagicMock(side_effect=lambda cid: channel if cid == 100 else None)
+        guild.get_thread = MagicMock(side_effect=lambda cid: created if cid == 200 else None)
+
+        state_values = {}
+
+        async def get_state(key):
+            await asyncio.sleep(0)
+            return state_values.get(key)
+
+        async def set_state(key, value):
+            state_values[key] = value
+
+        async def create_thread(**kwargs):
+            await asyncio.sleep(0)
+            return created
+
+        channel.create_thread = AsyncMock(side_effect=create_thread)
+        state = MagicMock()
+        state.async_get_state = AsyncMock(side_effect=get_state)
+        state.async_set_state = AsyncMock(side_effect=set_state)
+        state.async_delete_state = AsyncMock()
+
+        with patch.object(logcenter, "config", make_config(LOG_CHANNEL_ID=100)):
+            with patch.object(logcenter, "state_db", state):
+                first, second = await asyncio.gather(
+                    send_to_log(guild, "afk", content="первый"),
+                    send_to_log(guild, "afk", content="второй"),
+                )
+
+        self.assertIsNotNone(first)
+        self.assertIsNotNone(second)
+        channel.create_thread.assert_awaited_once()
+        self.assertEqual(created.send.await_count, 2)
+        self.assertEqual(state_values[f"log_thread:{guild.id}:afk"], "200")
 
 
 class TestArchivedThreadReuse(unittest.IsolatedAsyncioTestCase):
