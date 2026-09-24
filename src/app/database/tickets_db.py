@@ -1,6 +1,6 @@
 """Данные заявок: тикеты и дневная статистика.
 
-Жизненный цикл заявки (issues #2, #3):
+Жизненный цикл заявки:
 
 ```
             create_ticket()                begin_transition()      finalize_transition()

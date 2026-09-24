@@ -1,4 +1,4 @@
-"""Issue #7: разрешение объектов строго по ID; имя — только opt-in dev-режим."""
+"""Разрешение объектов строго по ID; имя — только opt-in dev-режим."""
 
 import unittest
 from unittest.mock import MagicMock, patch

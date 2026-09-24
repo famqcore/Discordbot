@@ -1,4 +1,4 @@
-"""Миграции схемы: preflight, backup, verified rebuild (issue #18).
+"""Миграции схемы: preflight, backup, verified rebuild.
 
 Фикстуры собирают базы в состояниях, которые встречаются у живых
 установок: схема v1 без guild_id, частично применённая миграция,

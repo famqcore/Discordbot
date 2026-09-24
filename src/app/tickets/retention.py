@@ -13,7 +13,7 @@
 Технические логи и бэкапы SQLite вне задачи: их ротацией управляет
 инфраструктура (docs/deployment.md).
 
-Цикл живёт на экземпляре Cog и отменяется в ``cog_unload`` (issue #21).
+Цикл живёт на экземпляре Cog и отменяется в ``cog_unload``.
 """
 
 from __future__ import annotations

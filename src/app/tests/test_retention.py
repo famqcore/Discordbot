@@ -1,4 +1,4 @@
-"""Ретенция заявок: удаление данных старше срока хранения (issues #6, #21)."""
+"""Ретенция заявок: удаление данных старше срока хранения."""
 
 import unittest
 from unittest.mock import AsyncMock, patch
@@ -223,7 +223,7 @@ class PurgeExpiredTestCase(unittest.IsolatedAsyncioTestCase):
 
 
 class RetentionCogLifecycleTestCase(unittest.IsolatedAsyncioTestCase):
-    """Issue #21: цикл принадлежит Cog и отменяется вместе с ним."""
+    """Цикл принадлежит Cog и отменяется вместе с ним."""
 
     async def asyncSetUp(self):
         self.bot = self._make_bot()

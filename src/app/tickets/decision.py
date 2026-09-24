@@ -1,4 +1,4 @@
-"""Решение по заявке: «Принять» / «Отказать» (issue #3)."""
+"""Решение по заявке: «Принять» / «Отказать»."""
 
 from __future__ import annotations
 
@@ -65,7 +65,7 @@ class DecisionReasonModal(discord.ui.Modal):
             placeholder="Укажите причину",
             style=discord.TextStyle.paragraph,
             required=True,
-            max_length=500,
+            max_length=config.TICKET_DECISION_REASON_MAX_LENGTH,
         )
         self.add_item(self.reason)
 

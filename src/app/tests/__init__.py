@@ -1,6 +1,6 @@
 """Пакет тестов.
 
-Политика предупреждений (issue #16): собственные DeprecationWarning и
+Политика предупреждений: собственные DeprecationWarning и
 RuntimeWarning — это ошибки, иначе «coroutine was never awaited» тихо
 маскирует неработающий тест. Исключение одно: discord.py 2.7.1 на
 Python 3.11 импортирует стандартный модуль ``audioop``, помеченный к

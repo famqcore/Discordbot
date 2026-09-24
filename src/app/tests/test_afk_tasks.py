@@ -1,4 +1,4 @@
-"""Issue #21: фоновое снятие AFK живёт на Cog, а не в module-global."""
+"""Фоновое снятие AFK живёт на Cog, а не в module-global."""
 
 import asyncio
 import unittest

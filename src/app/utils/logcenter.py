@@ -12,7 +12,7 @@
   созданных объектов в bot_state. Управляемый канал принадлежит боту,
   поэтому дрейф прав чинится принудительно и заметно.
 
-Устойчивость к архивации (issue #22): ветка ищется не только среди
+Устойчивость к архивации: ветка ищется не только среди
 активных (``channel.threads``), но и среди архивированных — через
 ``archived_threads()`` и ``fetch_channel``. Найденная архивированная
 ветка разархивируется, поэтому история одной категории не распадается
@@ -72,9 +72,7 @@ def _record_delivery(outcome: str, key: str, detail: str = "") -> None:
         _consecutive_failures = 0
         return
     _consecutive_failures += 1
-    message = (
-        f"logcenter outcome={outcome} key={key} " f"consecutive_failures={_consecutive_failures}"
-    )
+    message = f"logcenter outcome={outcome} key={key} consecutive_failures={_consecutive_failures}"
     if detail:
         message = f"{message} detail={detail}"
     if _consecutive_failures >= DEGRADED_ALERT_THRESHOLD:
@@ -147,7 +145,7 @@ async def _audit_thread(guild, channel, thread) -> list[str]:
 
     Тип проверяется строго: произвольный «что-нибудь с методом send»
     destination не принимается — только ``discord.Thread`` в настроенном
-    лог-канале этого сервера (issue #22).
+    лог-канале этого сервера.
     """
     if not isinstance(thread, discord.Thread):
         return [
@@ -195,7 +193,7 @@ async def _fetch_guild_channel(guild, channel_id):
 
 
 async def _find_thread_by_name(channel, name: str):
-    """Ищет ветку по имени среди активных И архивированных (issue #22).
+    """Ищет ветку по имени среди активных И архивированных.
 
     Без просмотра архива бот после автоархивации создал бы вторую ветку
     с тем же именем, и история категории разошлась бы на две.

@@ -1,4 +1,4 @@
-"""Терминальные действия по заявке: закрытие и решение (issue #3).
+"""Терминальные действия по заявке: закрытие и решение.
 
 Проверяется идемпотентность (двойной клик, гонка), порядок шагов и
 поведение при ошибках Discord: канал не должен исчезать раньше, чем
@@ -110,7 +110,7 @@ class CloseButtonTestCase(TerminalActionTestCase):
         self.channel.delete.assert_awaited_once()
 
     async def test_double_click_closes_once(self):
-        """Issue #3: два клика подряд — одно закрытие, один лог, одно удаление."""
+        """Два клика подряд дают одно закрытие, один лог и одно удаление."""
         first = self.interaction()
         second = self.interaction()
 
@@ -267,7 +267,7 @@ class DecisionTestCase(TerminalActionTestCase):
         self.assertIn(config.TICKET_ALREADY_DECIDED, interaction.sent_texts())
 
     async def test_accept_then_deny_race_single_decision(self):
-        """Issue #3: одновременные «Принять» и «Отказать» — побеждает один."""
+        """Одновременные «Принять» и «Отказать» обрабатываются один раз."""
         import asyncio
 
         accept = self.interaction()
@@ -356,7 +356,7 @@ class WorkflowStateTestCase(TerminalActionTestCase):
 
 
 class TranscriptTestCase(unittest.IsolatedAsyncioTestCase):
-    """Issue #19: состав и полнота снимка переписки."""
+    """Состав и полнота снимка переписки."""
 
     def _channel(self, messages):
         guild = FakeGuild(guild_id=1, name="Guild")
@@ -453,6 +453,10 @@ class TranscriptTestCase(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(transcript.message_count, 0)
         self.assertIsNone(await build_transcript_file(channel))
         self.assertFalse(transcript.failed)
+
+    async def test_rejects_message_limit_outside_supported_range(self):
+        with self.assertRaises(ValueError):
+            await build_transcript(self._channel([]), limit=0)
 
 
 if __name__ == "__main__":

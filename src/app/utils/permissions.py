@@ -1,9 +1,11 @@
 """Проверки прав доступа."""
 
+import discord
+
 import config
 
 
-def is_staff(member) -> bool:
+def is_staff(member: discord.Member | None) -> bool:
     """Модератор ли участник.
 
     Модератором считается тот, у кого есть право Discord

@@ -51,8 +51,7 @@ def build_afk_embed(guild: discord.Guild) -> discord.Embed:
         expected = clock.parse_db(row.get("estimated_return"))
         return_str = clock.to_local(expected).strftime("%H:%M") if expected else "—"
         line = f"{idx}) {name} | Причина: {reason}    Ушел: {since_str} | Вернется: {return_str}"
-        # запас под лимит description (4096), иначе длинный список ломает эмбед
-        if total_len + len(line) > 3900:
+        if total_len + len(line) > config.AFK_LIST_DESCRIPTION_MAX:
             overflow += 1
             continue
         total_len += len(line) + 1
@@ -70,7 +69,7 @@ def build_afk_embed(guild: discord.Guild) -> discord.Embed:
 
 class AfkReturnView(discord.ui.View):
     def __init__(self, member: discord.Member, guild_id: int, duration_text: str):
-        super().__init__(timeout=60)
+        super().__init__(timeout=config.AFK_RETURN_VIEW_TIMEOUT_SECONDS)
         self.member = member
         self.guild_id = guild_id
         self.duration_text = duration_text
@@ -134,13 +133,13 @@ class AfkSetModal(discord.ui.Modal, title=config.AFK_MODAL_TITLE):
         label=config.AFK_MODAL_REASON_LABEL,
         placeholder=config.AFK_MODAL_REASON_PLACEHOLDER,
         required=False,
-        max_length=100,
+        max_length=config.AFK_REASON_INPUT_MAX_LENGTH,
     )
     duration = discord.ui.TextInput(
         label=config.AFK_MODAL_DURATION_LABEL,
         placeholder=config.AFK_MODAL_DURATION_PLACEHOLDER,
         required=True,
-        max_length=50,
+        max_length=config.AFK_DURATION_INPUT_MAX_LENGTH,
     )
 
     def __init__(self, member: discord.Member, guild_id: int, guild: discord.Guild):
@@ -172,13 +171,13 @@ class AfkSetModal(discord.ui.Modal, title=config.AFK_MODAL_TITLE):
                 nick_applied=False,
             )
 
-            if result["created"]:
+            if result.created:
                 nick_applied = await add_afk_nickname(self.member)
                 if nick_applied:
                     mark_nick_applied(self.member.id, self.guild_id, True)
 
             timestamp = clock.timestamp(parsed.return_at)
-            prefix = "🔴 Вы в AFK." if result["created"] else "🔄 AFK обновлён."
+            prefix = "🔴 Вы в AFK." if result.created else "🔄 AFK обновлён."
             await interaction.response.send_message(
                 f"{prefix}\nПричина: {escape_user_text(reason)}\n"
                 f"Продолжительность: {format_minutes(parsed.minutes)}\n"
@@ -201,7 +200,7 @@ class AfkSetModal(discord.ui.Modal, title=config.AFK_MODAL_TITLE):
                 "afk.set",
                 guild_id=self.guild_id,
                 user_id=self.member.id,
-                created=result["created"],
+                created=result.created,
                 minutes=parsed.minutes,
             )
 

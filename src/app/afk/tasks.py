@@ -4,7 +4,7 @@
 Возвращение в чат или в голосовой канал статус не снимает — это делает
 только этот цикл, модератор (``!afk_remove``) или сам участник кнопкой.
 
-Lifecycle (issue #21): цикл живёт на экземпляре Cog, а не в module-global.
+Lifecycle: цикл живёт на экземпляре Cog, а не в module-global.
 Задача стартует после ``wait_until_ready`` и отменяется в ``cog_unload``,
 поэтому reload расширения и несколько bot instance не оставляют висящих
 задач и не плодят дубли.
@@ -45,8 +45,7 @@ async def expire_afk_once(bot) -> int:
             rows = get_expired_afk(guild_id, now_iso)
         except Exception as error:  # noqa: BLE001 - цикл не должен падать из-за одного сервера
             logger.exception(
-                f"afk.expiry outcome=db_error error_type={type(error).__name__} "
-                f"guild_id={guild_id}"
+                f"afk.expiry outcome=db_error error_type={type(error).__name__} guild_id={guild_id}"
             )
             continue
 

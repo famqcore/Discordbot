@@ -1,7 +1,7 @@
 """Версионирование схемы SQLite: preflight, backup, verified rebuild.
 
 Схема базы описана в ``database/schema.py`` — это единственный источник
-правды. Порядок работы ``migrate_schema`` (issue #18):
+правды. Порядок работы ``migrate_schema``:
 
 1. **Preflight.** Фактическая структура читается через PRAGMA
    (``table_info``, ``index_list``, ``index_info``, ``foreign_key_list``),

@@ -1,4 +1,4 @@
-"""Транскрипт тикета: снимок переписки перед удалением канала (issue #19).
+"""Транскрипт тикета: снимок переписки перед удалением канала.
 
 Согласованный объём (отражён в docs/privacy.md и в тексте, который видит
 модератор): это **ограниченный снимок** канала заявки, а не юридически
@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import io
 from dataclasses import dataclass, field
+from typing import Any
 
 import discord
 
@@ -34,7 +35,9 @@ from utils import clock
 from utils.logger import logger
 
 MAX_MESSAGES = 5000
-MAX_FILE_BYTES = 7 * 1024 * 1024  # запас под лимит вложений Discord (8 МБ)
+DISCORD_ATTACHMENT_LIMIT_BYTES = 8 * 1024 * 1024
+TRANSCRIPT_SAFETY_MARGIN_BYTES = 1024 * 1024
+MAX_FILE_BYTES = DISCORD_ATTACHMENT_LIMIT_BYTES - TRANSCRIPT_SAFETY_MARGIN_BYTES
 HEADER_SEPARATOR = "=" * 72
 
 
@@ -136,8 +139,15 @@ def _header(channel, message_count: int, truncated: bool) -> list[str]:
     ]
 
 
-async def build_transcript(channel, limit: int = MAX_MESSAGES) -> Transcript:
-    """Собирает снимок переписки. Всегда возвращает Transcript с диагностикой."""
+def _validate_message_limit(limit: int) -> int:
+    if not 1 <= limit <= MAX_MESSAGES:
+        raise ValueError(f"limit должен быть в диапазоне от 1 до {MAX_MESSAGES}")
+    return limit
+
+
+async def build_transcript(channel: Any, limit: int = MAX_MESSAGES) -> Transcript:
+    """Собирает ограниченный снимок переписки с диагностикой результата."""
+    limit = _validate_message_limit(limit)
     channel_id = getattr(channel, "id", 0)
     result = Transcript(channel_id=channel_id)
 
@@ -186,7 +196,9 @@ async def build_transcript(channel, limit: int = MAX_MESSAGES) -> Transcript:
     return result
 
 
-async def build_transcript_file(channel, limit: int = MAX_MESSAGES):
-    """Совместимая обёртка: список файлов или None."""
+async def build_transcript_file(
+    channel: Any, limit: int = MAX_MESSAGES
+) -> list[discord.File] | None:
+    """Возвращает файлы транскрипта или None, если сохранять нечего."""
     transcript = await build_transcript(channel, limit)
     return transcript.files or None

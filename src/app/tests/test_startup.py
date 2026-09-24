@@ -1,4 +1,4 @@
-"""Issue #7: проверка инфраструктуры на старте — fail fast в production."""
+"""Проверка инфраструктуры на старте — fail fast в production."""
 
 import unittest
 from types import SimpleNamespace

@@ -5,6 +5,7 @@ import discord
 
 import config
 from afk.views import AfkMenuView, AfkReturnView, AfkSetModal, build_afk_embed, parse_return_time
+from database.afk_db import AfkSetResult
 from tests.support import label_of
 from utils import clock
 
@@ -413,9 +414,7 @@ class TestAfkSetModalSubmit(unittest.IsolatedAsyncioTestCase):
         interaction.response.send_message = AsyncMock()
 
         with patch("afk.views.get_afk_user", return_value=None):
-            with patch(
-                "afk.views.set_afk", return_value={"created": True, "updated": False}
-            ) as mock_set:
+            with patch("afk.views.set_afk", return_value=AfkSetResult(created=True)) as mock_set:
                 with patch("afk.views.mark_nick_applied"):
                     with patch(
                         "afk.views.add_afk_nickname", new_callable=AsyncMock, return_value=True
@@ -441,9 +440,7 @@ class TestAfkSetModalSubmit(unittest.IsolatedAsyncioTestCase):
         interaction.response.send_message = AsyncMock()
 
         with patch("afk.views.get_afk_user", return_value=None):
-            with patch(
-                "afk.views.set_afk", return_value={"created": True, "updated": False}
-            ) as mock_set:
+            with patch("afk.views.set_afk", return_value=AfkSetResult(created=True)) as mock_set:
                 with patch("afk.views.mark_nick_applied"):
                     with patch(
                         "afk.views.add_afk_nickname", new_callable=AsyncMock, return_value=True

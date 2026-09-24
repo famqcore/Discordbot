@@ -36,7 +36,7 @@ class TestTicketTypeViewCallbacks(unittest.IsolatedAsyncioTestCase):
 
 class TestTicketModalSubmit(unittest.IsolatedAsyncioTestCase):
     async def test_on_submit_calls_create_ticket(self):
-        modal = TicketModal(config.TICKET_RP_TITLE, "rp", config.RP_FIELDS)
+        modal = TicketModal(config.RP_FORM)
         interaction = MagicMock()
         interaction.user = MagicMock()
         interaction.response = MagicMock()

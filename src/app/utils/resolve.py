@@ -29,7 +29,9 @@ def _report_missing(what: str, object_id: int, guild: discord.Guild) -> None:
         )
 
 
-def get_role(guild: discord.Guild, role_id: int | None, name: str | None = None):
+def get_role(
+    guild: discord.Guild, role_id: int | None, name: str | None = None
+) -> discord.Role | None:
     """Роль по ID. Поиск по имени — только в режиме разработки."""
     if role_id:
         role = guild.get_role(role_id)
@@ -46,7 +48,9 @@ def get_role(guild: discord.Guild, role_id: int | None, name: str | None = None)
     return None
 
 
-def get_category(guild: discord.Guild, category_id: int | None, name: str):
+def get_category(
+    guild: discord.Guild, category_id: int | None, name: str
+) -> discord.CategoryChannel | None:
     """Категория по ID. Поиск по имени — только в режиме разработки."""
     if category_id:
         category = guild.get_channel(category_id)
@@ -65,7 +69,9 @@ def get_category(guild: discord.Guild, category_id: int | None, name: str):
     return None
 
 
-def get_voice_channel(guild: discord.Guild, channel_id: int | None, name: str):
+def get_voice_channel(
+    guild: discord.Guild, channel_id: int | None, name: str
+) -> discord.VoiceChannel | None:
     """Голосовой канал по ID. Поиск по имени — только в режиме разработки."""
     if channel_id:
         channel = guild.get_channel(channel_id)
@@ -78,7 +84,7 @@ def get_voice_channel(guild: discord.Guild, channel_id: int | None, name: str):
         channel = discord.utils.get(guild.voice_channels, name=name)
         if channel is None:
             logger.warning(
-                f"Голосовой канал «{name}» не найден на сервере " f"{getattr(guild, 'name', guild)}"
+                f"Голосовой канал «{name}» не найден на сервере {getattr(guild, 'name', guild)}"
             )
         return channel
     return None

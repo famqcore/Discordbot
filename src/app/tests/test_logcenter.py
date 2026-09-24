@@ -337,7 +337,7 @@ class TestManagedLogCenter(unittest.IsolatedAsyncioTestCase):
 
 
 class TestArchivedThreadReuse(unittest.IsolatedAsyncioTestCase):
-    """Issue #22: архивированная ветка переиспользуется, а не дублируется."""
+    """Архивированная ветка переиспользуется, а не дублируется."""
 
     def _managed_state(self, guild, channel_id="100"):
         state = MagicMock()
@@ -462,7 +462,7 @@ class TestArchivedThreadReuse(unittest.IsolatedAsyncioTestCase):
 
 
 class TestDeliveryCounters(unittest.IsolatedAsyncioTestCase):
-    """Issue #22: потери аудита видны в счётчиках."""
+    """Потери аудита видны в счётчиках."""
 
     def setUp(self):
         logcenter.reset_delivery_stats()

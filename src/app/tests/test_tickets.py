@@ -17,28 +17,34 @@ from tests.support import (
 from tickets.call_voice import VoiceCallButton, VoiceSelectView
 from tickets.close_ticket import CloseButton
 from tickets.commands import TicketTypeView
-from tickets.create_ticket import TicketModal, create_ticket, sanitize_channel_name
+from tickets.create_ticket import (
+    TicketModal,
+    TicketSubmission,
+    create_ticket,
+    sanitize_channel_name,
+)
 from tickets.decision import ACCEPT, DENY, AcceptButton, DecisionReasonModal, DenyButton
 from tickets.views import FullTicketView
 
 
 class TestTicketModal(unittest.TestCase):
     def test_rp_modal_has_correct_fields(self):
-        modal = TicketModal(config.TICKET_RP_TITLE, "rp", config.RP_FIELDS)
-        self.assertEqual(modal.title, config.TICKET_RP_TITLE)
-        self.assertEqual(len(modal.children), 5)
-        self.assertEqual(modal.ticket_type, "rp")
+        modal = TicketModal(config.RP_FORM)
+        self.assertEqual(modal.title, config.RP_FORM.title)
+        self.assertEqual(len(modal.children), len(config.RP_FORM.fields))
+        self.assertEqual(modal.ticket_type, config.RP_FORM.ticket_type)
 
     def test_capt_modal_has_correct_fields(self):
-        modal = TicketModal(config.TICKET_CAPT_TITLE, "capt", config.CAPT_FIELDS)
-        self.assertEqual(modal.title, config.TICKET_CAPT_TITLE)
-        self.assertEqual(len(modal.children), 5)
+        modal = TicketModal(config.CAPT_FORM)
+        self.assertEqual(modal.title, config.CAPT_FORM.title)
+        self.assertEqual(len(modal.children), len(config.CAPT_FORM.fields))
 
     def test_modal_input_values(self):
-        modal = TicketModal("Test", "rp", config.RP_FIELDS)
+        modal = TicketModal(config.RP_FORM)
         first = modal.children[0]
-        self.assertEqual(label_of(first), config.RP_FIELDS[0][0])
-        self.assertEqual(first.placeholder, config.RP_FIELDS[0][1])
+        field = config.RP_FORM.fields[0]
+        self.assertEqual(label_of(first), field.label)
+        self.assertEqual(first.placeholder, field.placeholder)
         self.assertTrue(first.required)
 
 
@@ -65,7 +71,11 @@ class TestCreateTicket(unittest.IsolatedAsyncioTestCase):
                 ):
                     with patch("tickets.create_ticket.FullTicketView", return_value=MagicMock()):
                         channel = await create_ticket(
-                            self.interaction, config.TICKET_RP_TITLE, "rp", inputs
+                            self.interaction,
+                            TicketSubmission(
+                                config.RP_FORM,
+                                {label: text_input.value for label, text_input in inputs.items()},
+                            ),
                         )
 
         self.assertIs(channel, self.channel)

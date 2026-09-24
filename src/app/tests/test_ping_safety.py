@@ -1,4 +1,4 @@
-"""Приёмочные тесты по issue #4: пользовательский ввод не создаёт пинги.
+"""Приёмочные тесты: пользовательский ввод не создаёт пинги.
 
 Каждый недоверенный текст (причина AFK, причина решения) проверяется на
 @everyone / @here / упоминание роли и участника в точке отправки, а служебные
@@ -13,6 +13,7 @@ import discord
 import config
 from afk.events import AfkEventsCog
 from afk.views import AfkSetModal
+from database.afk_db import AfkSetResult
 from tests.support import FakeChannel, FakeGuild, FakeInteraction, FakeMember
 from tickets.decision import ACCEPT, DecisionReasonModal
 from tickets.workflow import TerminalOutcome
@@ -109,7 +110,7 @@ class AfkSetModalPingSafetyTestCase(unittest.IsolatedAsyncioTestCase):
 
         interaction = FakeInteraction(user=member, guild=guild)
 
-        with patch("afk.views.set_afk", return_value={"created": True, "updated": False}):
+        with patch("afk.views.set_afk", return_value=AfkSetResult(created=True)):
             with patch("afk.views.get_afk_user", return_value=None):
                 with patch("afk.views.add_afk_nickname", new_callable=AsyncMock, return_value=True):
                     with patch("afk.views.mark_nick_applied"):
@@ -131,7 +132,7 @@ class AfkSetModalPingSafetyTestCase(unittest.IsolatedAsyncioTestCase):
         modal.duration = MagicMock(value="1 час")
         interaction = FakeInteraction(user=member, guild=guild)
 
-        with patch("afk.views.set_afk", return_value={"created": True, "updated": False}):
+        with patch("afk.views.set_afk", return_value=AfkSetResult(created=True)):
             with patch("afk.views.get_afk_user", return_value=None):
                 with patch("afk.views.add_afk_nickname", new_callable=AsyncMock, return_value=True):
                     with patch("afk.views.mark_nick_applied"):
@@ -219,13 +220,11 @@ class CreateTicketServicePingTestCase(unittest.IsolatedAsyncioTestCase):
                             with patch(
                                 "tickets.create_ticket.FullTicketView", return_value=MagicMock()
                             ):
-                                from tickets.create_ticket import create_ticket
+                                from tickets.create_ticket import TicketSubmission, create_ticket
 
                                 await create_ticket(
                                     interaction,
-                                    config.TICKET_RP_TITLE,
-                                    "rp",
-                                    {"Никнейм": MagicMock(value="TestNick")},
+                                    TicketSubmission(config.RP_FORM, {"Никнейм": "TestNick"}),
                                 )
 
         ping_call = channel.send.await_args_list[1]

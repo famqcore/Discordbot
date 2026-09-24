@@ -26,7 +26,7 @@ from tests.support import (
 )
 from tickets.call_voice import VoiceCallButton, VoiceSelectView
 from tickets.close_ticket import CloseButton
-from tickets.create_ticket import create_ticket
+from tickets.create_ticket import TicketSubmission, create_ticket
 from tickets.decision import ACCEPT, DENY, AcceptButton, DecisionReasonModal, DenyButton
 
 
@@ -253,7 +253,7 @@ class CloseButtonPermissionTestCase(unittest.IsolatedAsyncioTestCase):
 
 
 class CreateTicketErrorsTestCase(unittest.IsolatedAsyncioTestCase):
-    """Issue #2: поведение при сбое на каждом шаге создания."""
+    """Поведение при сбое на каждом шаге создания."""
 
     GUILD_ID = 321
     USER_ID = 123
@@ -288,7 +288,13 @@ class CreateTicketErrorsTestCase(unittest.IsolatedAsyncioTestCase):
         started = [ctx.start() for ctx in defaults.values()]
         self.addCleanup(lambda: [ctx.stop() for ctx in defaults.values()])
         del started
-        return await create_ticket(self.interaction, config.TICKET_RP_TITLE, "rp", self.inputs)
+        return await create_ticket(
+            self.interaction,
+            TicketSubmission(
+                config.RP_FORM,
+                {label: text_input.value for label, text_input in self.inputs.items()},
+            ),
+        )
 
     async def test_role_grant_forbidden_does_not_fail_ticket(self):
         """Не выдалась роль — заявка всё равно создана."""
@@ -329,7 +335,7 @@ class CreateTicketErrorsTestCase(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(get_open_ticket_for_user(self.GUILD_ID, self.USER_ID))
 
     async def test_db_failure_removes_created_channel(self):
-        """Issue #2: запись не легла — канал не должен остаться сиротой."""
+        """Если запись не сохранилась, канал не остаётся сиротой."""
         with patch("tickets.create_ticket.save_ticket", side_effect=sqlite3.OperationalError("x")):
             result = await self._create()
 

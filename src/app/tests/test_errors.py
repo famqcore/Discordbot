@@ -1,4 +1,4 @@
-"""Единый error boundary (issue #20).
+"""Единый error boundary.
 
 Проверяется: traceback с correlation id, ровно один безопасный ответ
 пользователю, разделение ожидаемых ошибок Discord и настоящих сбоев,

@@ -32,7 +32,7 @@ class VoiceCallButton(discord.ui.Button):
 
 class VoiceSelectView(discord.ui.View):
     def __init__(self, channel):
-        super().__init__(timeout=60)
+        super().__init__(timeout=config.VOICE_SELECT_VIEW_TIMEOUT_SECONDS)
         self.ticket_channel = channel
         for i, name in enumerate(config.VOICE_CHANNELS):
             btn = discord.ui.Button(

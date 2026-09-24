@@ -75,7 +75,7 @@ class TestCommandError(unittest.IsolatedAsyncioTestCase):
         ctx.send.assert_called_once()
 
     async def test_unexpected_error_goes_to_errors_thread(self):
-        """Issue #20: один безопасный ответ пользователю + запись в лог-центр."""
+        """Один безопасный ответ пользователю и запись в лог-центр."""
         ctx = self._make_ctx()
         ctx.guild = MagicMock()
 
@@ -119,7 +119,7 @@ class TestBotConfiguration(unittest.TestCase):
         self.assertTrue(main_module.bot.intents.members)
 
     def test_client_mentions_policy_blocks_mass_pings(self):
-        # issue #4: клиентский default запрещает everyone/роли из любого текста
+        # клиентский default запрещает everyone/роли из любого текста
         allowed = main_module.bot.allowed_mentions
         self.assertFalse(allowed.everyone)
         self.assertFalse(allowed.roles)
