@@ -1,5 +1,5 @@
 # Multi-platform manifest pinned on 2026-09-24; see docs/deployment.md for updates.
-FROM python:3.11.16-slim-bookworm@sha256:a36c24f9cbdf4fd0f52d67f0823eeac19c2028c637cecc392d97f980d4fec56b
+FROM python:3.14.7-slim-bookworm@sha256:82bc3c539b8813ada9d68c63b40158fa002f7f33de9bf3312a3dfdc0620dff56
 
 ARG APP_UID=10001
 ARG APP_GID=10001
