@@ -269,6 +269,7 @@ class FakeGuild:
         self.text_channels = [c for c in channels if isinstance(c, FakeChannel)]
         self.create_text_channel = AsyncMock()
         self.fetch_channel = AsyncMock(side_effect=make_not_found())
+        self.fetch_member = AsyncMock(side_effect=make_not_found())
 
     def get_channel(self, channel_id: int):
         return self._channels.get(channel_id)

@@ -414,16 +414,15 @@ class TestAfkSetModalSubmit(unittest.IsolatedAsyncioTestCase):
         interaction.response.send_message = AsyncMock()
 
         with patch("afk.views.async_get_afk_user", new_callable=AsyncMock, return_value=None):
-            with patch("afk.views.async_set_afk", new_callable=AsyncMock, return_value=AfkSetResult(created=True)) as mock_set:
-                with patch("afk.views.async_mark_nick_applied"):
-                    with patch(
-                        "afk.views.add_afk_nickname", new_callable=AsyncMock, return_value=True
-                    ):
-                        with patch("afk.views.send_to_log", new_callable=AsyncMock):
-                            await modal.on_submit(interaction)
+            with patch(
+                "afk.views.async_set_afk", new_callable=AsyncMock, return_value=AfkSetResult(created=True)
+            ) as mock_set:
+                with patch("afk.views.add_afk_nickname", new_callable=AsyncMock, return_value=True):
+                    with patch("afk.views.send_to_log", new_callable=AsyncMock):
+                        await modal.on_submit(interaction)
 
         interaction.response.send_message.assert_awaited_once()
-        mock_set.assert_called_once()
+        self.assertTrue(mock_set.await_args.kwargs["nick_applied"])
 
     async def test_submit_default_reason(self):
         member = MagicMock()
@@ -440,15 +439,14 @@ class TestAfkSetModalSubmit(unittest.IsolatedAsyncioTestCase):
         interaction.response.send_message = AsyncMock()
 
         with patch("afk.views.async_get_afk_user", new_callable=AsyncMock, return_value=None):
-            with patch("afk.views.async_set_afk", new_callable=AsyncMock, return_value=AfkSetResult(created=True)) as mock_set:
-                with patch("afk.views.async_mark_nick_applied"):
-                    with patch(
-                        "afk.views.add_afk_nickname", new_callable=AsyncMock, return_value=True
-                    ):
-                        with patch("afk.views.send_to_log", new_callable=AsyncMock):
-                            await modal.on_submit(interaction)
+            with patch(
+                "afk.views.async_set_afk", new_callable=AsyncMock, return_value=AfkSetResult(created=True)
+            ) as mock_set:
+                with patch("afk.views.add_afk_nickname", new_callable=AsyncMock, return_value=True):
+                    with patch("afk.views.send_to_log", new_callable=AsyncMock):
+                        await modal.on_submit(interaction)
 
-        self.assertEqual(mock_set.call_args.args[2], config.AFK_REASON_DEFAULT)
+        self.assertEqual(mock_set.await_args.args[2], config.AFK_REASON_DEFAULT)
 
 
 if __name__ == "__main__":

@@ -62,7 +62,7 @@ async def expire_afk_once(bot) -> int:
 
             expired_total += 1
             duration = session["duration_seconds"]
-            member = guild.get_member(user_id)
+            member = await _member_from_cache_or_api(guild, user_id)
             if member is not None:
                 await _restore_member(member, session, guild_id, user_id)
 
@@ -83,6 +83,24 @@ async def expire_afk_once(bot) -> int:
             )
 
     return expired_total
+
+
+async def _member_from_cache_or_api(guild, user_id: int):
+    """Находит участника, даже если Discord-клиент ещё не заполнил кэш."""
+    member = guild.get_member(user_id)
+    if member is not None:
+        return member
+
+    try:
+        return await guild.fetch_member(user_id)
+    except discord.NotFound:
+        return None  # пользователь действительно покинул сервер
+    except (discord.Forbidden, discord.HTTPException) as error:
+        logger.warning(
+            f"afk.expiry outcome=member_fetch_failed error_type={type(error).__name__} "
+            f"guild_id={getattr(guild, 'id', None)} user_id={user_id}"
+        )
+        return None
 
 
 async def _cleanup_cooldowns(now) -> None:

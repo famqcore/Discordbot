@@ -81,6 +81,22 @@ class ExpireAfkTestCase(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(count, 1)
         mock_log.assert_awaited_once()
 
+    async def test_cache_miss_fetches_member_to_restore_nickname(self):
+        bot, guild = self._make_bot()
+        member = FakeMember(user_id=456, name="vasya", guild=guild)
+        guild.fetch_member = AsyncMock(return_value=member)
+
+        with patch("afk.tasks.async_get_expired_afk", new_callable=AsyncMock, return_value=[{"user_id": 456}]):
+            with patch("afk.tasks._take_session", new_callable=AsyncMock, return_value=self._session()):
+                with patch("afk.tasks.remove_afk_nickname", new_callable=AsyncMock) as mock_nick:
+                    with patch("afk.tasks.send_to_log", new_callable=AsyncMock):
+                        count = await expire_afk_once(bot)
+
+        self.assertEqual(count, 1)
+        guild.fetch_member.assert_awaited_once_with(456)
+        mock_nick.assert_awaited_once_with(member, "Вася", nick_applied=True)
+        member.send.assert_awaited_once()
+
     async def test_row_taken_by_concurrent_actor_skipped(self):
         """Гонка с !afk_remove: снимает тот, кто первым забрал сессию."""
         bot, _ = self._make_bot()

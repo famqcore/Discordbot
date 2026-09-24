@@ -16,7 +16,6 @@ from .models import (
     add_afk_nickname,
     async_get_afk_user,
     async_get_all_afk,
-    async_mark_nick_applied,
     async_set_afk,
     async_take_afk_session,
     format_duration,
@@ -162,20 +161,18 @@ class AfkSetModal(discord.ui.Modal, title=config.AFK_MODAL_TITLE):
             existing = await async_get_afk_user(self.member.id, self.guild_id)
             original_nick = existing["original_nick"] if existing else self.member.nick
 
+            # Сначала меняем ник, затем сохраняем его результат вместе с
+            # новой сессией. Отдельный mark после редактирования оставлял
+            # неубираемый префикс, если процесс прерывался между шагами.
+            nick_applied = await add_afk_nickname(self.member) if existing is None else False
             result = await async_set_afk(
                 self.member.id,
                 self.guild_id,
                 reason,
                 estimated_return=clock.to_db(parsed.return_at),
                 original_nick=original_nick,
-                nick_applied=False,
+                nick_applied=nick_applied,
             )
-
-            if result.created:
-                nick_applied = await add_afk_nickname(self.member)
-                if nick_applied:
-                    await async_mark_nick_applied(self.member.id, self.guild_id, True)
-
             timestamp = clock.timestamp(parsed.return_at)
             prefix = "🔴 Вы в AFK." if result.created else "🔄 AFK обновлён."
             await interaction.response.send_message(

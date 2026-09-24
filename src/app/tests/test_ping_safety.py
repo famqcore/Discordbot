@@ -113,9 +113,8 @@ class AfkSetModalPingSafetyTestCase(unittest.IsolatedAsyncioTestCase):
         with patch("afk.views.async_set_afk", new_callable=AsyncMock, return_value=AfkSetResult(created=True)):
             with patch("afk.views.async_get_afk_user", new_callable=AsyncMock, return_value=None):
                 with patch("afk.views.add_afk_nickname", new_callable=AsyncMock, return_value=True):
-                    with patch("afk.views.async_mark_nick_applied"):
-                        with patch("afk.views.send_to_log", new_callable=AsyncMock):
-                            await modal.on_submit(interaction)
+                    with patch("afk.views.send_to_log", new_callable=AsyncMock):
+                        await modal.on_submit(interaction)
 
         call = interaction.response.send_message.await_args
         assert_no_pings(self, call.args[0])
@@ -135,9 +134,8 @@ class AfkSetModalPingSafetyTestCase(unittest.IsolatedAsyncioTestCase):
         with patch("afk.views.async_set_afk", new_callable=AsyncMock, return_value=AfkSetResult(created=True)):
             with patch("afk.views.async_get_afk_user", new_callable=AsyncMock, return_value=None):
                 with patch("afk.views.add_afk_nickname", new_callable=AsyncMock, return_value=True):
-                    with patch("afk.views.async_mark_nick_applied"):
-                        with patch("afk.views.send_to_log", new_callable=AsyncMock) as mock_log:
-                            await modal.on_submit(interaction)
+                    with patch("afk.views.send_to_log", new_callable=AsyncMock) as mock_log:
+                        await modal.on_submit(interaction)
 
         embed = mock_log.await_args.kwargs["embed"]
         reason_field = next(f for f in embed.fields if f.name == "Причина")
