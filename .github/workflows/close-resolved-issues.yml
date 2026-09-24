@@ -1,0 +1,27 @@
+name: close-resolved-issues
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - .github/workflows/close-resolved-issues.yml
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  close:
+    name: Close completed tracker batch
+    runs-on: ubuntu-latest
+    steps:
+      - name: Close issues resolved by PR 45
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          for issue in 14 16 32 33 35 36; do
+            gh issue close "$issue" --reason completed \
+              --comment "Исправлено и проверено в #45. Оба обязательных CI job прошли."
+          done
