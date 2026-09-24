@@ -1,34 +1,25 @@
-"""Создание заявки: идемпотентный workflow с компенсацией (issue #2).
-
-Порядок шагов выбран так, чтобы после любого сбоя пара «состояние БД —
-канал Discord» оставалась согласованной:
-
-1. проверка активной заявки (её наличие сразу возвращает ссылку на канал);
-2. создание канала — единственный внешний объект, который придётся убирать;
-3. запись в БД. Конфликт уникального индекса означает, что параллельный
-   submit победил: созданный канал удаляется, пользователь получает ссылку
-   на существующую заявку;
-4. только после успешной записи — необязательные шаги (роль, DM, карточка,
-   пинг, лог). Их сбой не отменяет заявку: канал и запись уже согласованы,
-   проблема уходит в лог с correlation id.
-
-Сбой на шаге 2 или 3 компенсируется полностью: канал удаляется, запись
-удаляется, ошибка уборки не маскируется. Заявки, пережившие рестарт в
-несогласованном виде, подбирает ``tickets/reconcile.py``.
-"""
+"""Создание заявок и компенсация при сбоях внешних операций."""
 
 from __future__ import annotations
 
 import json
 import re
 import sqlite3
+from collections.abc import Mapping
+from dataclasses import dataclass
+from typing import Any
 
 import discord
 
 import config
-from database.tickets_db import add_log_message_id, get_open_ticket_for_user, save_ticket
+from database.tickets_db import (
+    async_add_log_message_id,
+    async_delete_ticket,
+    async_get_open_ticket_for_user,
+    async_save_ticket,
+)
 from utils import clock
-from utils.errors import log_event, new_correlation_id
+from utils.errors import InteractionErrorBoundary, log_event, new_correlation_id
 from utils.logcenter import LOG_KEY_TICKETS, send_to_log
 from utils.logger import logger
 from utils.mentions import mentions_for
@@ -41,61 +32,98 @@ PING_ROLE_SPECS = (
     ("ROLE_OWNER_ID", "ROLE_OWNER"),
     ("ROLE_DEP_OWNER_ID", "ROLE_DEP_OWNER"),
 )
-
 ACCESS_ROLE_SPECS = PING_ROLE_SPECS + (
     ("ROLE_ADMIN_ID", "ROLE_ADMIN"),
     ("ROLE_SUPPORT_ID", "ROLE_SUPPORT"),
 )
 
 
+@dataclass(frozen=True)
+class TicketSubmission:
+    """Данные одной заполненной формы до создания канала."""
+
+    form: config.TicketForm
+    answers: Mapping[str, str]
+
+    @property
+    def topic(self) -> str:
+        return self.form.title
+
+    @property
+    def ticket_type(self) -> str:
+        return self.form.ticket_type
+
+
+@dataclass(frozen=True)
+class CreatedTicket:
+    """Согласованные объекты созданной заявки."""
+
+    guild: discord.Guild
+    applicant: discord.Member
+    channel: discord.TextChannel
+    submission: TicketSubmission
+
+
 def sanitize_channel_name(text: str) -> str:
-    """Имя канала из ника игрока: Discord не переваривает пробелы и спецсимволы."""
-    text = re.sub(r"\s+", "-", text.lower().strip())
-    text = re.sub(r"[^a-z0-9а-яё_-]", "", text)
-    return text.strip("-")[:90] or "user"
+    """Возвращает допустимую для Discord часть имени канала."""
+    normalized = re.sub(r"\s+", "-", text.lower().strip())
+    sanitized = re.sub(r"[^a-z0-9а-яё_-]", "", normalized).strip("-")
+    return sanitized[: config.TICKET_CHANNEL_SLUG_MAX_LENGTH] or "user"
 
 
 class TicketModal(discord.ui.Modal):
-    def __init__(self, title, ticket_type, fields):
-        super().__init__(title=title)
-        self.ticket_type = ticket_type
-        self.inputs = {}
+    def __init__(self, form: config.TicketForm) -> None:
+        super().__init__(title=form.title)
+        self.form = form
+        self.ticket_type = form.ticket_type
+        self.inputs: dict[str, discord.ui.TextInput] = {}
 
-        for label, placeholder, required, max_length in fields:
-            style = discord.TextStyle.paragraph if max_length > 150 else discord.TextStyle.short
-            inp = discord.ui.TextInput(
-                label=label,
-                placeholder=placeholder,
-                style=style,
-                required=required,
-                max_length=max_length,
+        for field in form.fields:
+            style = (
+                discord.TextStyle.paragraph
+                if field.max_length >= config.TICKET_MULTILINE_FIELD_MIN_LENGTH
+                else discord.TextStyle.short
             )
-            self.inputs[label] = inp
-            self.add_item(inp)
+            text_input = discord.ui.TextInput(
+                label=field.label,
+                placeholder=field.placeholder,
+                style=style,
+                required=field.required,
+                max_length=field.max_length,
+            )
+            self.inputs[field.label] = text_input
+            self.add_item(text_input)
 
-    async def on_submit(self, interaction: discord.Interaction):
-        log_event(
-            "ticket.submit",
-            guild_id=getattr(interaction, "guild_id", None),
-            user_id=getattr(interaction.user, "id", None),
-            ticket_type=self.ticket_type,
-        )
-        await create_ticket(interaction, self.title, self.ticket_type, self.inputs)
+    async def on_submit(self, interaction: discord.Interaction) -> None:
+        async with InteractionErrorBoundary(interaction, "ticket.submit"):
+            submission = TicketSubmission(
+                form=self.form,
+                answers={label: text_input.value for label, text_input in self.inputs.items()},
+            )
+            log_event(
+                "ticket.submit",
+                guild_id=getattr(interaction, "guild_id", None),
+                user_id=getattr(interaction.user, "id", None),
+                ticket_type=submission.ticket_type,
+            )
+            await create_ticket(interaction, submission)
 
 
-def _resolve_roles(guild, specs) -> list[discord.Role]:
-    roles = []
-    for id_attr, name_attr in specs:
-        role = get_role(guild, getattr(config, id_attr), getattr(config, name_attr))
-        if role is not None:
-            roles.append(role)
-    return roles
+def _resolve_roles(guild: discord.Guild, specs: tuple[tuple[str, str], ...]) -> list[discord.Role]:
+    return [
+        role
+        for id_attr, name_attr in specs
+        if (role := get_role(guild, getattr(config, id_attr), getattr(config, name_attr)))
+        is not None
+    ]
 
 
-def _build_overwrites(guild, member) -> dict:
+def _build_overwrites(
+    guild: discord.Guild, applicant: discord.Member
+) -> dict[discord.abc.Snowflake, discord.PermissionOverwrite]:
     overwrites = {
         guild.default_role: discord.PermissionOverwrite(read_messages=False),
-        member: discord.PermissionOverwrite(read_messages=True, send_messages=True),
+        applicant: discord.PermissionOverwrite(read_messages=True, send_messages=True),
         guild.me: discord.PermissionOverwrite(read_messages=True, send_messages=True),
     }
     for role in _resolve_roles(guild, ACCESS_ROLE_SPECS):
@@ -103,8 +131,8 @@ def _build_overwrites(guild, member) -> dict:
     return overwrites
 
 
-async def _delete_channel(channel, reason: str, correlation_id: str) -> bool:
-    """Компенсация: удаляет созданный канал. Ошибку уборки не прячем."""
+async def _delete_channel(channel: Any, reason: str, correlation_id: str) -> bool:
+    """Удаляет канал, созданный неуспешной операцией."""
     if channel is None:
         return True
     try:
@@ -127,9 +155,30 @@ async def _reply(interaction: discord.Interaction, content: str) -> None:
         logger.warning(f"ticket.create outcome=reply_failed error_type={type(error).__name__}")
 
 
-async def create_ticket(interaction, topic, ticket_type, inputs):
+async def _create_ticket_channel(
+    guild: discord.Guild,
+    applicant: discord.Member,
+    submission: TicketSubmission,
+) -> discord.TextChannel:
+    category = get_category(guild, config.TICKETS_CATEGORY_ID, config.TICKETS_CATEGORY_NAME)
+    if category is None and config.TICKETS_CATEGORY_ID is None:
+        category = await guild.create_category(config.TICKETS_CATEGORY_NAME)
+
+    channel_name = f"{submission.ticket_type}-{sanitize_channel_name(applicant.name)}"
+    return await guild.create_text_channel(
+        channel_name,
+        category=category,
+        overwrites=_build_overwrites(guild, applicant),
+        reason=f"Заявка {submission.ticket_type} от {applicant.id}",
+    )
+
+
+async def create_ticket(
+    interaction: discord.Interaction, submission: TicketSubmission
+) -> discord.TextChannel | None:
+    """Создаёт заявку, компенсируя канал при ошибке записи в SQLite."""
     guild = interaction.guild
-    member = interaction.user
+    applicant = interaction.user
     correlation_id = new_correlation_id()
 
     try:
@@ -142,100 +191,74 @@ async def create_ticket(interaction, topic, ticket_type, inputs):
         return None
 
     guild_id = getattr(guild, "id", None)
-    user_id = getattr(member, "id", None)
+    user_id = getattr(applicant, "id", None)
     if not isinstance(guild_id, int) or not isinstance(user_id, int):
         await _reply(interaction, config.ERROR_TICKET_CREATE)
         return None
 
-    existing = get_open_ticket_for_user(guild_id, user_id)
-    if existing:
-        await _reply(
-            interaction,
-            config.TICKET_ALREADY_OPEN.format(channel=f"<#{existing['channel_id']}>"),
-        )
-        return None
-
     channel = None
-    saved = False
     try:
-        category = get_category(guild, config.TICKETS_CATEGORY_ID, config.TICKETS_CATEGORY_NAME)
-        if category is None and config.TICKETS_CATEGORY_ID is None:
-            category = await guild.create_category(config.TICKETS_CATEGORY_NAME)
-
-        answers = {label: inp.value for label, inp in inputs.items()}
-        channel_name = f"{ticket_type}-{sanitize_channel_name(member.name)}"
-        channel = await guild.create_text_channel(
-            channel_name,
-            category=category,
-            overwrites=_build_overwrites(guild, member),
-            reason=f"Заявка {ticket_type} от {user_id}",
-        )
-
-        try:
-            save_ticket(
-                channel.id,
-                user_id,
-                member.name,
-                topic,
-                ticket_type,
-                json.dumps(answers, ensure_ascii=False),
-                clock.to_db(),
-                guild_id=guild_id,
-            )
-        except sqlite3.IntegrityError:
-            # параллельный submit успел раньше: убираем лишний канал и
-            # показываем ссылку на реально существующую заявку
-            await _delete_channel(channel, "Duplicate open ticket prevented", correlation_id)
-            channel = None
-            current = get_open_ticket_for_user(guild_id, user_id)
-            link = f"<#{current['channel_id']}>" if current else "уже открыта"
-            await _reply(interaction, config.TICKET_ALREADY_OPEN.format(channel=link))
-            log_event(
-                "ticket.create",
-                outcome="duplicate",
-                guild_id=guild_id,
-                user_id=user_id,
-                correlation_id=correlation_id,
+        existing = await async_get_open_ticket_for_user(guild_id, user_id)
+        if existing:
+            await _reply(
+                interaction,
+                config.TICKET_ALREADY_OPEN.format(channel=f"<#{existing['channel_id']}>"),
             )
             return None
-        saved = True
 
+        channel = await _create_ticket_channel(guild, applicant, submission)
+        await async_save_ticket(
+            channel.id,
+            user_id,
+            applicant.name,
+            submission.topic,
+            submission.ticket_type,
+            json.dumps(submission.answers, ensure_ascii=False),
+            clock.to_db(),
+            guild_id=guild_id,
+        )
+    except sqlite3.IntegrityError:
+        await _delete_channel(channel, "Duplicate open ticket prevented", correlation_id)
+        current = await async_get_open_ticket_for_user(guild_id, user_id)
+        channel_link = f"<#{current['channel_id']}>" if current else "уже открыта"
+        await _reply(interaction, config.TICKET_ALREADY_OPEN.format(channel=channel_link))
+        log_event(
+            "ticket.create",
+            outcome="duplicate",
+            guild_id=guild_id,
+            user_id=user_id,
+            correlation_id=correlation_id,
+        )
+        return None
     except (discord.Forbidden, discord.HTTPException, sqlite3.Error) as error:
         logger.exception(
             f"ticket.create outcome=error error_type={type(error).__name__} "
             f"guild_id={guild_id} user_id={user_id} correlation_id={correlation_id}"
         )
-        if saved:
-            await _rollback_saved_ticket(channel, correlation_id)
-        else:
-            await _delete_channel(channel, "Rollback failed ticket creation", correlation_id)
+        await _rollback_saved_ticket(channel, correlation_id)
         await _reply(interaction, config.ERROR_TICKET_CREATE)
         return None
 
-    # С этого момента заявка существует и согласована с каналом.
-    # Оставшиеся шаги необязательны: их сбой логируется, но не откатывает тикет.
-    await _post_create_steps(interaction, guild, member, channel, topic, ticket_type, answers)
-
+    ticket = CreatedTicket(guild, applicant, channel, submission)
+    await _post_create_steps(ticket)
     await _reply(interaction, f"Заявка создана! {channel.mention}")
     log_event(
         "ticket.create",
         guild_id=guild_id,
         user_id=user_id,
         channel_id=channel.id,
-        ticket_type=ticket_type,
+        ticket_type=submission.ticket_type,
     )
     return channel
 
 
-async def _rollback_saved_ticket(channel, correlation_id: str) -> None:
-    """Сбой после записи в БД: снимаем и запись, и канал."""
-    from database.tickets_db import delete_ticket
-
+async def _rollback_saved_ticket(channel: Any, correlation_id: str) -> None:
+    """Удаляет канал и запись после неудачного сохранения заявки."""
     channel_id = getattr(channel, "id", None)
     removed = await _delete_channel(channel, "Rollback failed ticket creation", correlation_id)
     if channel_id is not None:
         try:
-            delete_ticket(channel_id)
+            await async_delete_ticket(channel_id)
         except sqlite3.Error as error:
             logger.exception(
                 f"ticket.create outcome=db_rollback_failed error_type={type(error).__name__} "
@@ -250,59 +273,76 @@ async def _rollback_saved_ticket(channel, correlation_id: str) -> None:
         )
 
 
-async def _post_create_steps(interaction, guild, member, channel, topic, ticket_type, answers):
-    """Необязательные шаги: роль, DM, карточка, пинг, лог."""
-    guild_id = guild.id
+async def _post_create_steps(ticket: CreatedTicket) -> None:
+    """Выполняет необязательные уведомления после согласованного создания."""
+    await _grant_applied_role(ticket)
+    await _notify_applicant(ticket.applicant)
+    await _send_ticket_card(ticket)
+    await _write_creation_log(ticket)
 
-    apply_role = get_role(guild, config.ROLE_APPLIED_ID, config.ROLE_APPLIED)
-    if apply_role is not None and apply_role < guild.me.top_role:
-        try:
-            await member.add_roles(apply_role, reason="Подана заявка")
-        except (discord.Forbidden, discord.HTTPException) as error:
-            logger.warning(
-                f"ticket.create outcome=role_failed error_type={type(error).__name__} "
-                f"guild_id={guild_id} role_id={apply_role.id}"
-            )
 
+async def _grant_applied_role(ticket: CreatedTicket) -> None:
+    role = get_role(ticket.guild, config.ROLE_APPLIED_ID, config.ROLE_APPLIED)
+    if role is None or not role < ticket.guild.me.top_role:
+        return
     try:
-        await member.send(config.DM_MESSAGE)
+        await ticket.applicant.add_roles(role, reason="Подана заявка")
+    except (discord.Forbidden, discord.HTTPException) as error:
+        logger.warning(
+            f"ticket.create outcome=role_failed error_type={type(error).__name__} "
+            f"guild_id={ticket.guild.id} role_id={role.id}"
+        )
+
+
+async def _notify_applicant(applicant: discord.Member) -> None:
+    try:
+        await applicant.send(config.DM_MESSAGE)
     except discord.Forbidden:
-        pass  # личка закрыта — ожидаемо
+        return
     except discord.HTTPException as error:
         logger.warning(f"ticket.create outcome=dm_failed error_type={type(error).__name__}")
 
-    embed = discord.Embed(title=topic, color=discord.Color.gold(), timestamp=clock.utcnow())
-    embed.add_field(name="От кого", value=member.mention, inline=False)
-    for label, value in answers.items():
-        # field value ограничен 1024 символами у Discord
-        embed.add_field(
-            name=label, value=(value or "—")[: config.DISCORD_EMBED_FIELD_VALUE_MAX], inline=False
-        )
 
+def _ticket_embed(ticket: CreatedTicket) -> discord.Embed:
+    embed = discord.Embed(
+        title=ticket.submission.topic,
+        color=discord.Color.gold(),
+        timestamp=clock.utcnow(),
+    )
+    embed.add_field(name="От кого", value=ticket.applicant.mention, inline=False)
+    for label, value in ticket.submission.answers.items():
+        embed.add_field(
+            name=label,
+            value=(value or "—")[: config.DISCORD_EMBED_FIELD_VALUE_MAX],
+            inline=False,
+        )
+    return embed
+
+
+async def _send_ticket_card(ticket: CreatedTicket) -> None:
     try:
-        await channel.send(embed=embed, view=FullTicketView())
-        ping_roles = _resolve_roles(guild, PING_ROLE_SPECS)
+        await ticket.channel.send(embed=_ticket_embed(ticket), view=FullTicketView())
+        ping_roles = _resolve_roles(ticket.guild, PING_ROLE_SPECS)
         if ping_roles:
-            # служебный пинг рекрутёров: адресный AllowedMentions,
-            # массовые упоминания запрещены на уровне клиента
-            await channel.send(
-                f"{member.mention} {' '.join(role.mention for role in ping_roles)}",
-                allowed_mentions=mentions_for(users=[member], roles=ping_roles),
+            await ticket.channel.send(
+                f"{ticket.applicant.mention} {' '.join(role.mention for role in ping_roles)}",
+                allowed_mentions=mentions_for(users=[ticket.applicant], roles=ping_roles),
             )
     except (discord.Forbidden, discord.HTTPException) as error:
         logger.exception(
             f"ticket.create outcome=card_failed error_type={type(error).__name__} "
-            f"guild_id={guild_id} channel_id={channel.id}"
+            f"guild_id={ticket.guild.id} channel_id={ticket.channel.id}"
         )
 
-    log_embed = discord.Embed(
-        title=f"📥 Новая заявка: {ticket_type}",
+
+async def _write_creation_log(ticket: CreatedTicket) -> None:
+    embed = discord.Embed(
+        title=f"📥 Новая заявка: {ticket.submission.ticket_type}",
         color=discord.Color.gold(),
         timestamp=clock.utcnow(),
     )
-    log_embed.add_field(name="Заявитель", value=member.mention, inline=True)
-    log_embed.add_field(name="Тикет", value=channel.mention, inline=True)
-    log_message = await send_to_log(guild, LOG_KEY_TICKETS, embed=log_embed)
+    embed.add_field(name="Заявитель", value=ticket.applicant.mention, inline=True)
+    embed.add_field(name="Тикет", value=ticket.channel.mention, inline=True)
+    log_message = await send_to_log(ticket.guild, LOG_KEY_TICKETS, embed=embed)
     if log_message is not None:
-        # связь с логом нужна, чтобы удаление данных стирало вложения
-        add_log_message_id(channel.id, log_message.channel.id, log_message.id)
+        await async_add_log_message_id(ticket.channel.id, log_message.channel.id, log_message.id)

@@ -1,6 +1,6 @@
 """Данные заявок: тикеты и дневная статистика.
 
-Жизненный цикл заявки (issues #2, #3):
+Жизненный цикл заявки:
 
 ```
             create_ticket()                begin_transition()      finalize_transition()
@@ -25,7 +25,8 @@ from __future__ import annotations
 
 import json
 import sqlite3
-from typing import Any
+from collections.abc import Callable
+from typing import Any, TypeVar
 
 from utils import clock
 
@@ -42,6 +43,12 @@ ANONYMIZED_USER_ID = 0
 ANONYMIZED_USER_NAME = "deleted-user"
 
 _ACTIVE_SQL = ", ".join("?" for _ in ACTIVE_STATUSES)
+T = TypeVar("T")
+
+
+async def _run_async(operation: Callable[[], T], *, write: bool = False) -> T:
+    """Выполняет синхронную операцию репозитория в потоке шлюза БД."""
+    return await db.arun(lambda _connection: operation(), write=write)
 
 
 def init_db() -> None:
@@ -503,16 +510,133 @@ def anonymize_user_tickets(guild_id: int, user_id: int) -> int:
 def get_retention_expired(cutoff_iso: str) -> list[sqlite3.Row]:
     """Тикеты старше срока хранения.
 
-    Конечные — по дате закрытия, активные (заброшенные) — по дате создания.
+    Конечные — по дате закрытия, открытые заброшенные — по дате создания.
+    ``processing`` принадлежит текущему терминальному действию, поэтому его
+    возвращает в ``open`` reconciliation после истечения захвата.
     """
     return db.run(
         lambda conn: conn.execute(
             f"""
             SELECT * FROM tickets
             WHERE (status NOT IN ({_ACTIVE_SQL}) AND closed_at IS NOT NULL AND closed_at < ?)
-               OR (status IN ({_ACTIVE_SQL}) AND created_at < ?)
+               OR (status = ? AND created_at < ?)
             ORDER BY id
             """,
-            (*ACTIVE_STATUSES, cutoff_iso, *ACTIVE_STATUSES, cutoff_iso),
+            (*ACTIVE_STATUSES, cutoff_iso, STATUS_OPEN, cutoff_iso),
         ).fetchall()
     )
+
+
+# ---------------------------------------------------------------------------
+# Асинхронный API для обработчиков Discord
+# ---------------------------------------------------------------------------
+
+
+async def async_save_ticket(
+    channel_id: int,
+    user_id: int,
+    user_name: str | None,
+    topic: str,
+    ticket_type: str | None,
+    answers: str | None,
+    created_at: str | None = None,
+    guild_id: int = 0,
+) -> int:
+    return await _run_async(
+        lambda: save_ticket(
+            channel_id,
+            user_id,
+            user_name,
+            topic,
+            ticket_type,
+            answers,
+            created_at,
+            guild_id,
+        ),
+        write=True,
+    )
+
+
+async def async_get_ticket(channel_id: int) -> sqlite3.Row | None:
+    return await _run_async(lambda: get_ticket(channel_id))
+
+
+async def async_get_open_ticket_for_user(guild_id: int, user_id: int) -> sqlite3.Row | None:
+    return await _run_async(lambda: get_open_ticket_for_user(guild_id, user_id))
+
+
+async def async_get_active_tickets(guild_id: int | None = None) -> list[sqlite3.Row]:
+    return await _run_async(lambda: get_active_tickets(guild_id))
+
+
+async def async_get_stale_processing(older_than_iso: str) -> list[sqlite3.Row]:
+    return await _run_async(lambda: get_stale_processing(older_than_iso))
+
+
+async def async_get_all_tickets(limit: int = 50, guild_id: int = 0) -> list[sqlite3.Row]:
+    return await _run_async(lambda: get_all_tickets(limit, guild_id))
+
+
+async def async_get_user_tickets(guild_id: int, user_id: int) -> list[sqlite3.Row]:
+    return await _run_async(lambda: get_user_tickets(guild_id, user_id))
+
+
+async def async_begin_transition(
+    channel_id: int, target_status: str, guild_id: int | None = None
+) -> bool:
+    return await _run_async(
+        lambda: begin_transition(channel_id, target_status, guild_id), write=True
+    )
+
+
+async def async_release_transition(channel_id: int) -> bool:
+    return await _run_async(lambda: release_transition(channel_id), write=True)
+
+
+async def async_finalize_transition(
+    channel_id: int,
+    status: str,
+    closed_by: int | None = None,
+    reason: str | None = None,
+) -> bool:
+    return await _run_async(
+        lambda: finalize_transition(channel_id, status, closed_by, reason), write=True
+    )
+
+
+async def async_update_ticket_status(
+    channel_id: int,
+    status: str,
+    closed_by: int | None = None,
+    reason: str | None = None,
+    guild_id: int | None = None,
+) -> bool:
+    return await _run_async(
+        lambda: update_ticket_status(channel_id, status, closed_by, reason, guild_id), write=True
+    )
+
+
+async def async_delete_ticket(channel_id: int) -> bool:
+    return await _run_async(lambda: delete_ticket(channel_id), write=True)
+
+
+async def async_delete_ticket_by_id(ticket_id: int) -> bool:
+    return await _run_async(lambda: delete_ticket_by_id(ticket_id), write=True)
+
+
+async def async_get_stats(guild_id: int = 0) -> dict[str, Any]:
+    return await _run_async(lambda: get_stats(guild_id))
+
+
+async def async_add_log_message_id(channel_id: int, thread_id: int, message_id: int) -> bool:
+    return await _run_async(
+        lambda: add_log_message_id(channel_id, thread_id, message_id), write=True
+    )
+
+
+async def async_anonymize_user_tickets(guild_id: int, user_id: int) -> int:
+    return await _run_async(lambda: anonymize_user_tickets(guild_id, user_id), write=True)
+
+
+async def async_get_retention_expired(cutoff_iso: str) -> list[sqlite3.Row]:
+    return await _run_async(lambda: get_retention_expired(cutoff_iso))

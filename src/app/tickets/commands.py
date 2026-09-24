@@ -7,7 +7,11 @@ from discord.ext import commands
 
 import config
 from database.schema import STATUS_ACCEPTED, STATUS_DENIED
-from database.tickets_db import get_all_tickets, get_open_ticket_for_user, get_stats
+from database.tickets_db import (
+    async_get_all_tickets,
+    async_get_open_ticket_for_user,
+    async_get_stats,
+)
 from utils.errors import InteractionErrorBoundary, new_correlation_id
 from utils.logger import logger
 from utils.mentions import escape_user_text, mentions_for
@@ -34,19 +38,13 @@ class TicketTypeView(discord.ui.View):
         self.add_item(capt)
 
     async def _send_modal_or_existing_ticket(
-        self,
-        interaction: discord.Interaction,
-        title: str,
-        ticket_type: str,
-        fields: list,
-    ):
+        self, interaction: discord.Interaction, form: config.TicketForm
+    ) -> None:
         guild_id = getattr(interaction, "guild_id", None) or getattr(
             getattr(interaction, "guild", None), "id", None
         )
         user_id = getattr(getattr(interaction, "user", None), "id", None)
         if isinstance(guild_id, int) and isinstance(user_id, int):
-            # проверка активной заявки и кулдаун до открытия формы:
-            # пользователь не тратит время на анкету, которую нельзя подать
             wait = retry_after(
                 ("ticket_type", guild_id, user_id), config.TICKET_BUTTON_COOLDOWN_SECONDS
             )
@@ -57,7 +55,7 @@ class TicketTypeView(discord.ui.View):
                 )
                 return
 
-            existing = get_open_ticket_for_user(guild_id, user_id)
+            existing = await async_get_open_ticket_for_user(guild_id, user_id)
             if existing:
                 channel = f"<#{existing['channel_id']}>"
                 await interaction.response.send_message(
@@ -65,25 +63,15 @@ class TicketTypeView(discord.ui.View):
                 )
                 return
 
-        await interaction.response.send_modal(TicketModal(title, ticket_type, fields))
+        await interaction.response.send_modal(TicketModal(form))
 
-    async def rp_callback(self, interaction: discord.Interaction):
+    async def rp_callback(self, interaction: discord.Interaction) -> None:
         async with InteractionErrorBoundary(interaction, "ticket.form_open", ticket_type="rp"):
-            await self._send_modal_or_existing_ticket(
-                interaction,
-                config.TICKET_RP_TITLE,
-                "rp",
-                config.RP_FIELDS,
-            )
+            await self._send_modal_or_existing_ticket(interaction, config.RP_FORM)
 
-    async def capt_callback(self, interaction: discord.Interaction):
+    async def capt_callback(self, interaction: discord.Interaction) -> None:
         async with InteractionErrorBoundary(interaction, "ticket.form_open", ticket_type="capt"):
-            await self._send_modal_or_existing_ticket(
-                interaction,
-                config.TICKET_CAPT_TITLE,
-                "capt",
-                config.CAPT_FIELDS,
-            )
+            await self._send_modal_or_existing_ticket(interaction, config.CAPT_FORM)
 
 
 class DeleteUserDataConfirmView(discord.ui.View):
@@ -93,7 +81,7 @@ class DeleteUserDataConfirmView(discord.ui.View):
     """
 
     def __init__(self, admin_id: int, member: discord.Member):
-        super().__init__(timeout=60)
+        super().__init__(timeout=config.DELETE_USER_DATA_CONFIRM_TIMEOUT_SECONDS)
         self.admin_id = admin_id
         self.member = member
 
@@ -142,7 +130,11 @@ class TicketsCog(commands.Cog):
 
     @commands.command(name=config.CMD_FAMQCORE)
     @commands.guild_only()
-    @commands.cooldown(1, config.FAMQCORE_COMMAND_COOLDOWN_SECONDS, commands.BucketType.channel)
+    @commands.cooldown(
+        config.FAMQCORE_COMMAND_COOLDOWN_RATE,
+        config.FAMQCORE_COMMAND_COOLDOWN_SECONDS,
+        commands.BucketType.channel,
+    )
     async def famqcore_apply(self, ctx):
         embed = discord.Embed(
             title=config.FAMQCORE_EMBED_TITLE,
@@ -154,9 +146,13 @@ class TicketsCog(commands.Cog):
     @commands.command(name=config.CMD_STATS)
     @commands.guild_only()
     @commands.has_permissions(administrator=True)
-    @commands.cooldown(2, config.AFK_LOOKUP_COOLDOWN_SECONDS, commands.BucketType.user)
+    @commands.cooldown(
+        config.TICKET_ADMIN_COMMAND_COOLDOWN_RATE,
+        config.TICKET_ADMIN_COMMAND_COOLDOWN_SECONDS,
+        commands.BucketType.user,
+    )
     async def show_stats(self, ctx):
-        stats = get_stats(ctx.guild.id)
+        stats = await async_get_stats(ctx.guild.id)
         embed = discord.Embed(title="Статистика заявок", color=discord.Color.gold())
         embed.add_field(name="Всего", value=stats["total"], inline=True)
         embed.add_field(name="Принято", value=stats["accepted"], inline=True)
@@ -170,17 +166,28 @@ class TicketsCog(commands.Cog):
                 f"(✅ {row['accepted']} / ❌ {row['denied']})"
                 for row in weekly
             ]
-            embed.add_field(name="По дням", value="\n".join(lines)[:1024], inline=False)
+            embed.add_field(
+                name="По дням",
+                value="\n".join(lines)[: config.DISCORD_EMBED_FIELD_VALUE_MAX],
+                inline=False,
+            )
 
         await ctx.send(embed=embed, allowed_mentions=mentions_for())
 
     @commands.command(name=config.CMD_HISTORY)
     @commands.guild_only()
     @commands.has_permissions(administrator=True)
-    @commands.cooldown(2, config.AFK_LOOKUP_COOLDOWN_SECONDS, commands.BucketType.user)
-    async def show_history(self, ctx, limit: int = 10):
-        limit = min(max(limit, 1), 25)
-        tickets = get_all_tickets(limit=limit, guild_id=ctx.guild.id)
+    @commands.cooldown(
+        config.TICKET_ADMIN_COMMAND_COOLDOWN_RATE,
+        config.TICKET_ADMIN_COMMAND_COOLDOWN_SECONDS,
+        commands.BucketType.user,
+    )
+    async def show_history(self, ctx, limit: int = config.TICKET_HISTORY_DEFAULT_LIMIT):
+        limit = min(
+            max(limit, config.TICKET_HISTORY_MIN_LIMIT),
+            config.TICKET_HISTORY_MAX_LIMIT,
+        )
+        tickets = await async_get_all_tickets(limit=limit, guild_id=ctx.guild.id)
         if not tickets:
             await ctx.send("Нет заявок в истории")
             return
@@ -191,7 +198,9 @@ class TicketsCog(commands.Cog):
             emoji = "✅" if status == STATUS_ACCEPTED else "❌" if status == STATUS_DENIED else "🟡"
             user_text = "Удалённый пользователь" if t["user_id"] == 0 else f"<@{t['user_id']}>"
             embed.add_field(
-                name=f"{emoji} {escape_user_text(t['topic'])}"[:256],
+                name=f"{emoji} {escape_user_text(t['topic'])}"[
+                    : config.DISCORD_EMBED_FIELD_NAME_MAX
+                ],
                 value=f"От: {user_text}\n{t['created_at'][:10]}",
                 inline=False,
             )
@@ -200,7 +209,11 @@ class TicketsCog(commands.Cog):
     @commands.command(name=config.CMD_DELETE_USER_DATA)
     @commands.guild_only()
     @commands.has_permissions(administrator=True)
-    @commands.cooldown(2, config.AFK_LOOKUP_COOLDOWN_SECONDS, commands.BucketType.user)
+    @commands.cooldown(
+        config.TICKET_ADMIN_COMMAND_COOLDOWN_RATE,
+        config.TICKET_ADMIN_COMMAND_COOLDOWN_SECONDS,
+        commands.BucketType.user,
+    )
     async def delete_user_data(self, ctx: commands.Context, member: discord.Member):
         """Необратимое удаление данных пользователя (требует подтверждения)."""
         view = DeleteUserDataConfirmView(ctx.author.id, member)

@@ -1,4 +1,4 @@
-"""Единый error boundary (issue #20).
+"""Единый error boundary.
 
 Проверяется: traceback с correlation id, ровно один безопасный ответ
 пользователю, разделение ожидаемых ошибок Discord и настоящих сбоев,
@@ -51,7 +51,7 @@ class FormatContextTestCase(unittest.TestCase):
 
 class RetryPolicyTestCase(unittest.TestCase):
     def test_server_errors_are_retryable(self):
-        for status in (500, 502, 503, 504):
+        for status in (429, 500, 502, 503, 504):
             self.assertTrue(is_retryable(http_exception(status)))
 
     def test_client_errors_are_not_retryable(self):

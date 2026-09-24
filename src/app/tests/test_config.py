@@ -1,6 +1,7 @@
 import importlib
 import os
 import unittest
+from dataclasses import replace
 from unittest.mock import patch
 
 import config
@@ -86,20 +87,19 @@ class TestConfig(unittest.TestCase):
         self.assertIsInstance(config.FAMQCORE_EMBED_DESCRIPTION, str)
         self.assertIn("FAMQCORE", config.FAMQCORE_EMBED_TITLE)
 
-    def test_rp_fields_is_list(self):
-        self.assertIsInstance(config.RP_FIELDS, list)
-        self.assertEqual(len(config.RP_FIELDS), 5)
-        for field in config.RP_FIELDS:
-            self.assertEqual(len(field), 4)
-            label, placeholder, required, max_length = field
-            self.assertIsInstance(label, str)
-            self.assertIsInstance(placeholder, str)
-            self.assertIsInstance(required, bool)
-            self.assertIsInstance(max_length, int)
-
-    def test_capt_fields_is_list(self):
-        self.assertIsInstance(config.CAPT_FIELDS, list)
-        self.assertEqual(len(config.CAPT_FIELDS), 5)
+    def test_ticket_forms_are_structured(self):
+        self.assertEqual(len(config.TICKET_FORMS), 2)
+        for form in config.TICKET_FORMS:
+            self.assertIsInstance(form, config.TicketForm)
+            self.assertTrue(form.title)
+            self.assertTrue(form.ticket_type)
+            self.assertEqual(len(form.fields), 5)
+            for field in form.fields:
+                self.assertIsInstance(field, config.TicketField)
+                self.assertIsInstance(field.label, str)
+                self.assertIsInstance(field.placeholder, str)
+                self.assertIsInstance(field.required, bool)
+                self.assertIsInstance(field.max_length, int)
 
     def test_error_messages(self):
         self.assertIsInstance(config.ERROR_TICKET_CREATE, str)
@@ -179,27 +179,58 @@ class TestConfig(unittest.TestCase):
         self.assertIsInstance(config.AFK_NICK_PREFIX, str)
         self.assertEqual(config.AFK_NICK_PREFIX, "[AFK] ")
 
+    def test_voice_call_button_cooldown(self):
+        self.assertIsInstance(config.VOICE_CALL_BUTTON_COOLDOWN_SECONDS, int)
+        self.assertGreater(config.VOICE_CALL_BUTTON_COOLDOWN_SECONDS, 0)
+
 
 class TestValidate(unittest.TestCase):
     def test_current_config_valid(self):
         self.assertEqual(config.validate(), [])
 
     def test_catches_long_label(self):
-        bad_fields = [("x" * 46, "p", True, 100)]
-        with patch("config.RP_FIELDS", bad_fields):
+        invalid_form = replace(
+            config.RP_FORM,
+            fields=(config.TicketField("x" * 46, "p", True, 100),),
+        )
+        with patch("config.TICKET_FORMS", (invalid_form, config.CAPT_FORM)):
             errors = config.validate()
-        self.assertTrue(any("45" in e for e in errors))
+        self.assertTrue(any("45" in error for error in errors))
 
     def test_catches_too_many_fields(self):
-        bad_fields = [("f", "p", True, 100)] * 6
-        with patch("config.CAPT_FIELDS", bad_fields):
+        invalid_form = replace(
+            config.CAPT_FORM,
+            fields=(config.TicketField("f", "p", True, 100),) * 6,
+        )
+        with patch("config.TICKET_FORMS", (config.RP_FORM, invalid_form)):
             errors = config.validate()
-        self.assertTrue(any("5" in e for e in errors))
+        self.assertTrue(any("5" in error for error in errors))
 
     def test_modal_labels_fit_discord_limit(self):
-        for fields in (config.RP_FIELDS, config.CAPT_FIELDS):
-            for label, *_ in fields:
-                self.assertLessEqual(len(label), 45, label)
+        for form in config.TICKET_FORMS:
+            for field in form.fields:
+                self.assertLessEqual(len(field.label), config.DISCORD_LABEL_MAX_LENGTH, field.label)
+
+    def test_catches_text_input_length_beyond_discord_limit(self):
+        invalid_form = replace(
+            config.RP_FORM,
+            fields=(
+                config.TicketField(
+                    "Поле",
+                    "Подсказка",
+                    True,
+                    config.DISCORD_TEXT_INPUT_MAX_LENGTH + 1,
+                ),
+            ),
+        )
+        with patch("config.TICKET_FORMS", (invalid_form, config.CAPT_FORM)):
+            errors = config.validate()
+        self.assertTrue(any("max_length" in error for error in errors))
+
+    def test_catches_too_small_rate_limit_storage(self):
+        with patch("config.RATELIMIT_MAX_ENTRIES", config.MIN_RATELIMIT_ENTRIES - 1):
+            errors = config.validate()
+        self.assertTrue(any("RATELIMIT_MAX_ENTRIES" in error for error in errors))
 
 
 class TestEnvParsing(unittest.TestCase):

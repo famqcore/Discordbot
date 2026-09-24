@@ -1,6 +1,6 @@
 """Конфигурация бота: загрузка, разбор и валидация .env.
 
-Три раздельных шага (issue #12):
+Три раздельных шага:
 
 1. **Загрузка.** ``load_dotenv()`` и чтение переменных окружения как строк.
 2. **Разбор.** Функции ``_int_env``/``_int_list_env``/``_seconds_env`` строго
@@ -18,6 +18,7 @@
 """
 
 import os
+from dataclasses import dataclass
 
 from dotenv import load_dotenv
 
@@ -107,33 +108,28 @@ def _int_list_env(name: str) -> list[int]:
     return ids
 
 
-def _seconds_env(name: str, default: int, minimum: int, maximum: int) -> int:
-    """Интервал в секундах с проверкой диапазона; при ошибке — default."""
+@dataclass(frozen=True)
+class IntBounds:
+    minimum: int
+    maximum: int
+    unit: str
+
+
+def _bounded_int_env(name: str, default: int, bounds: IntBounds) -> int:
+    """Целое значение из .env в заданных границах; при ошибке — default."""
     value = _raw_env(name)
     if value is None:
         return default
     try:
         number = int(value)
     except ValueError:
-        _error(f"{name}: значение «{value}» не целое число секунд")
+        _error(f"{name}: значение «{value}» не целое число ({bounds.unit})")
         return default
-    if number < minimum or number > maximum:
-        _error(f"{name}: {number} вне допустимого диапазона {minimum}–{maximum} сек")
-        return default
-    return number
-
-
-def _days_env(name: str, default: int, minimum: int, maximum: int) -> int:
-    value = _raw_env(name)
-    if value is None:
-        return default
-    try:
-        number = int(value)
-    except ValueError:
-        _error(f"{name}: значение «{value}» не целое число дней")
-        return default
-    if number < minimum or number > maximum:
-        _error(f"{name}: {number} вне допустимого диапазона {minimum}–{maximum} дн")
+    if not bounds.minimum <= number <= bounds.maximum:
+        _error(
+            f"{name}: {number} вне допустимого диапазона "
+            f"{bounds.minimum}–{bounds.maximum} {bounds.unit}"
+        )
         return default
     return number
 
@@ -154,6 +150,8 @@ def _timezone_env(name: str, default: str) -> str:
 TOKEN = os.getenv("TOKEN")
 DB_PATH = os.path.join(os.path.dirname(__file__), "database", "database.db")
 LOG_DIR = os.path.join(os.path.dirname(__file__), "logs")
+LOG_FILE_MAX_BYTES = 5 * 1024 * 1024
+LOG_FILE_BACKUP_COUNT = 3
 
 # ---------------------------------------------------------------------------
 # ID всех объектов сервера задаются через .env (см. .env.example).
@@ -255,21 +253,35 @@ CMD_PREFIX = "!"
 CMD_FAMQCORE = "famqcore"
 CMD_STATS = "stats"
 CMD_HISTORY = "history"
+CMD_AFK = "afk"
+CMD_AFK_LIST = "afk_list"
+CMD_AFK_CHECK = "afk_check"
+CMD_AFK_STATS = "afk_stats"
 CMD_AFK_REMOVE = "afk_remove"
 CMD_DELETE_USER_DATA = "delete_user_data"
 
-# Rate limits (commands.cooldown): значения в секундах.
+# Rate limits (commands.cooldown): число вызовов и интервал в секундах.
+FAMQCORE_COMMAND_COOLDOWN_RATE = 1
 FAMQCORE_COMMAND_COOLDOWN_SECONDS = 30
+AFK_COMMAND_COOLDOWN_RATE = 1
 AFK_COMMAND_COOLDOWN_SECONDS = 10
+AFK_LIST_COOLDOWN_RATE = 1
 AFK_LIST_COOLDOWN_SECONDS = 10
+AFK_LOOKUP_COOLDOWN_RATE = 3
 AFK_LOOKUP_COOLDOWN_SECONDS = 10
+TICKET_ADMIN_COMMAND_COOLDOWN_RATE = 2
+TICKET_ADMIN_COMMAND_COOLDOWN_SECONDS = 10
 TICKET_BUTTON_COOLDOWN_SECONDS = 5
+VOICE_CALL_BUTTON_COOLDOWN_SECONDS = 15
+TICKET_HISTORY_DEFAULT_LIMIT = 10
+TICKET_HISTORY_MIN_LIMIT = 1
+TICKET_HISTORY_MAX_LIMIT = 25
+DELETE_USER_DATA_CONFIRM_TIMEOUT_SECONDS = 60
+VOICE_SELECT_VIEW_TIMEOUT_SECONDS = 60
+AFK_RETURN_VIEW_TIMEOUT_SECONDS = 60
 
 # Тексты
 DM_MESSAGE = "Вы подали заявку в FAMQCORE, ожидайте — скоро её рассмотрят ⏳."
-
-TICKET_RP_TITLE = "RP ЗАЯВКА"
-TICKET_CAPT_TITLE = "CAPT ЗАЯВКА"
 
 FAMQCORE_EMBED_TITLE = "FAMQCORE"
 PRIVACY_NOTICE = (
@@ -285,36 +297,67 @@ FAMQCORE_EMBED_DESCRIPTION = (
     "**Важно:** заполняйте форму внимательно и указывайте актуальные данные.\n\n"
     f"**Данные:** {PRIVACY_NOTICE}"
 )
-RP_FIELDS = [
-    ("Никнейм в игре + статик", "Ваш игровой ник и статик", True, 100),
-    ("OOC имя и возраст(IRL)", "Ваше реальное имя и возраст", True, 100),
-    ("Семьи в которых вы состояли", "Перечислите все семьи, и почему ушли?", True, 300),
-    ("Почему именно наша семья", "Потому что ...", True, 500),
-    (
-        "Средний онлайн (например, 12:00–17:00)",
-        "Сколько часов играете / в какое время",
-        True,
-        100,
-    ),
-]
 
-CAPT_FIELDS = [
-    ("Никнейм в игре", "Ваш игровой ник", True, 50),
-    ("Статик", "Ваш статик", False, 50),
-    ("OOC имя и возраст", "Ваше реальное имя и возраст", True, 100),
-    (
-        "Откат сайга и спешик",
-        "Ваши откаты (важно: нужно именно два ваших отката)",
-        True,
-        200,
+
+@dataclass(frozen=True)
+class TicketField:
+    label: str
+    placeholder: str
+    required: bool
+    max_length: int
+
+
+@dataclass(frozen=True)
+class TicketForm:
+    ticket_type: str
+    title: str
+    fields: tuple[TicketField, ...]
+
+
+RP_FORM = TicketForm(
+    ticket_type="rp",
+    title="RP ЗАЯВКА",
+    fields=(
+        TicketField("Никнейм в игре + статик", "Ваш игровой ник и статик", True, 100),
+        TicketField("OOC имя и возраст(IRL)", "Ваше реальное имя и возраст", True, 100),
+        TicketField(
+            "Семьи в которых вы состояли", "Перечислите все семьи, и почему ушли?", True, 300
+        ),
+        TicketField("Почему именно наша семья", "Потому что ...", True, 500),
+        TicketField(
+            "Средний онлайн (например, 12:00–17:00)",
+            "Сколько часов играете / в какое время",
+            True,
+            100,
+        ),
     ),
-    (
-        "Откаты MCL каптов и МП",
-        "Ваши откаты в MCL (необязательно, но будет плюсом)",
-        False,
-        200,
+)
+
+CAPT_FORM = TicketForm(
+    ticket_type="capt",
+    title="CAPT ЗАЯВКА",
+    fields=(
+        TicketField("Никнейм в игре", "Ваш игровой ник", True, 50),
+        TicketField("Статик", "Ваш статик", False, 50),
+        TicketField("OOC имя и возраст", "Ваше реальное имя и возраст", True, 100),
+        TicketField(
+            "Откат сайга и спешик",
+            "Ваши откаты (важно: нужно именно два ваших отката)",
+            True,
+            200,
+        ),
+        TicketField(
+            "Откаты MCL каптов и МП",
+            "Ваши откаты в MCL (необязательно, но будет плюсом)",
+            False,
+            200,
+        ),
     ),
-]
+)
+
+TICKET_FORMS = (RP_FORM, CAPT_FORM)
+TICKET_RP_TITLE = RP_FORM.title
+TICKET_CAPT_TITLE = CAPT_FORM.title
 
 ACCEPT_EMBED_TITLE = "✅ Заявка принята, добро пожаловать в семью"
 DENY_EMBED_TITLE = "❌ Заявка отклонена"
@@ -336,6 +379,8 @@ AFK_EMBED_DESCRIPTION = "Используй кнопки ниже для упр�
 AFK_MENU_TITLE = "Во время AFK вам не будут выдавать высказывания по причине НВС"
 AFK_MENU_NO_AFK = "В АФК никого нет."
 AFK_MENU_TOTAL = "Всего в АФК"
+AFK_REASON_INPUT_MAX_LENGTH = 100
+AFK_DURATION_INPUT_MAX_LENGTH = 50
 
 # установка AFK
 AFK_MODAL_TITLE = "Установка AFK"
@@ -381,19 +426,21 @@ AFK_COOLDOWN_SECONDS = 30
 AFK_NICK_PREFIX = "[AFK] "
 DISCORD_NICK_MAX_LENGTH = 32
 
-# Границы длительности AFK (issue #13). Нулевая длительность запрещена:
+# Границы длительности AFK. Нулевая длительность запрещена:
 # «остаюсь на месте» — это не AFK, а кнопка «Отменить AFK».
 AFK_MIN_DURATION_MINUTES = 1
 AFK_MAX_DURATION_MINUTES = 30 * 24 * 60  # 30 суток
 
-# Автоответы на упоминания AFK (issue #10)
+# Автоответы на упоминания AFK
 AFK_MAX_MENTIONS_PER_MESSAGE = 5  # сколько упоминаний проверяем в одном сообщении
 AFK_REPLY_CHANNEL_LIMIT = 3  # автоответов на канал за окно
 AFK_REPLY_CHANNEL_WINDOW_SECONDS = 20
 AFK_REPLY_DELETE_AFTER_SECONDS = 60
 
 # Авто-снятие AFK по истечении времени (фоновая задача)
-AFK_EXPIRY_CHECK_SECONDS = _seconds_env("AFK_EXPIRY_CHECK_SECONDS", 60, 10, 86400)
+AFK_EXPIRY_CHECK_SECONDS = _bounded_int_env(
+    "AFK_EXPIRY_CHECK_SECONDS", 60, IntBounds(10, 86400, "сек")
+)
 AFK_EXPIRED_DM = "⏰ Ваш AFK на сервере {guild} истёк — вы снова в строю."
 
 # Логи AFK в лог-центр
@@ -438,15 +485,19 @@ RETENTION_AUDIT_TITLE = "🧾 Ретенция: очистка старых за
 # Срок хранения тикетов и транскриптов (дни), по умолчанию 180.
 # Записи старше срока удаляются фоновой задачей вместе с привязанными
 # сообщениями лог-центра (docs/privacy.md).
-TICKET_RETENTION_DAYS = _days_env("TICKET_RETENTION_DAYS", 180, 1, 3650)
-RETENTION_CHECK_SECONDS = _seconds_env("RETENTION_CHECK_SECONDS", 86400, 60, 604800)
+TICKET_RETENTION_DAYS = _bounded_int_env("TICKET_RETENTION_DAYS", 180, IntBounds(1, 3650, "дн"))
+RETENTION_CHECK_SECONDS = _bounded_int_env(
+    "RETENTION_CHECK_SECONDS", 86400, IntBounds(60, 604800, "сек")
+)
 
 # Тикет, застрявший в состоянии processing дольше этого срока, считается
-# брошенным: reconciliation вернёт его в работу или закроет (issues #2, #3).
-TICKET_PROCESSING_TIMEOUT_SECONDS = _seconds_env(
-    "TICKET_PROCESSING_TIMEOUT_SECONDS", 300, 30, 86400
+# брошенным: reconciliation вернёт его в работу или закроет.
+TICKET_PROCESSING_TIMEOUT_SECONDS = _bounded_int_env(
+    "TICKET_PROCESSING_TIMEOUT_SECONDS", 300, IntBounds(30, 86400, "сек")
 )
-TICKET_RECONCILE_CHECK_SECONDS = _seconds_env("TICKET_RECONCILE_CHECK_SECONDS", 600, 60, 86400)
+TICKET_RECONCILE_CHECK_SECONDS = _bounded_int_env(
+    "TICKET_RECONCILE_CHECK_SECONDS", 600, IntBounds(60, 86400, "сек")
+)
 
 # Поля эмбеда !afk_check
 AFK_FIELD_STATUS = "Статус"
@@ -469,7 +520,7 @@ GUILD_TIMEZONE = _timezone_env("GUILD_TIMEZONE", "UTC")
 LEGACY_TIMEZONE = _timezone_env("LEGACY_TIMEZONE", "UTC")
 
 # ---------------------------------------------------------------------------
-# Лимиты in-memory rate limiter (issue #15)
+# Лимиты in-memory rate limiter
 # ---------------------------------------------------------------------------
 
 RATELIMIT_MAX_ENTRIES = 10000  # жёсткий потолок ключей в памяти
@@ -478,32 +529,46 @@ RATELIMIT_CLEANUP_INTERVAL_SECONDS = 60
 # Лимиты Discord, на которые опирается валидация
 DISCORD_MODAL_MAX_FIELDS = 5
 DISCORD_LABEL_MAX_LENGTH = 45
+DISCORD_TEXT_INPUT_MAX_LENGTH = 4000
+DISCORD_TEXT_INPUT_PLACEHOLDER_MAX_LENGTH = 100
 DISCORD_EMBED_DESCRIPTION_MAX = 4096
+DISCORD_EMBED_FIELD_NAME_MAX = 256
 DISCORD_EMBED_FIELD_VALUE_MAX = 1024
 DISCORD_CHANNEL_NAME_MAX = 100
+AFK_LIST_DESCRIPTION_MAX = 3900
+TICKET_CHANNEL_SLUG_MAX_LENGTH = 90
+TICKET_MULTILINE_FIELD_MIN_LENGTH = 151
+TICKET_DECISION_REASON_MAX_LENGTH = 500
+MIN_RATELIMIT_ENTRIES = 100
 
 
 def _validate_forms(errors: list[str]) -> None:
-    for name, fields in (("RP_FIELDS", RP_FIELDS), ("CAPT_FIELDS", CAPT_FIELDS)):
-        if len(fields) > DISCORD_MODAL_MAX_FIELDS:
+    for form in TICKET_FORMS:
+        if len(form.fields) > DISCORD_MODAL_MAX_FIELDS:
             errors.append(
-                f"{name}: полей {len(fields)}, а модалка вмещает максимум "
+                f"{form.ticket_type}: полей {len(form.fields)}, а модалка вмещает максимум "
                 f"{DISCORD_MODAL_MAX_FIELDS}"
             )
-        if not fields:
-            errors.append(f"{name}: форма без полей не имеет смысла")
-        for label, placeholder, _required, max_length in fields:
-            if len(label) > DISCORD_LABEL_MAX_LENGTH:
+        if not form.fields:
+            errors.append(f"{form.ticket_type}: форма без полей не имеет смысла")
+        for field in form.fields:
+            if len(field.label) > DISCORD_LABEL_MAX_LENGTH:
                 errors.append(
-                    f"{name}: label «{label[:30]}…» длиной {len(label)} > "
+                    f"{form.ticket_type}: label «{field.label[:30]}…» длиной {len(field.label)} > "
                     f"{DISCORD_LABEL_MAX_LENGTH} символов"
                 )
-            if not 1 <= max_length <= 4000:
-                errors.append(f"{name}: max_length поля «{label[:30]}» вне диапазона 1–4000")
-            if len(placeholder) > 100:
-                errors.append(f"{name}: placeholder поля «{label[:30]}» длиннее 100 символов")
+            if not 1 <= field.max_length <= DISCORD_TEXT_INPUT_MAX_LENGTH:
+                errors.append(
+                    f"{form.ticket_type}: max_length поля «{field.label[:30]}» вне диапазона "
+                    f"1–{DISCORD_TEXT_INPUT_MAX_LENGTH}"
+                )
+            if len(field.placeholder) > DISCORD_TEXT_INPUT_PLACEHOLDER_MAX_LENGTH:
+                errors.append(
+                    f"{form.ticket_type}: placeholder поля «{field.label[:30]}» длиннее "
+                    f"{DISCORD_TEXT_INPUT_PLACEHOLDER_MAX_LENGTH} символов"
+                )
 
-    if not TICKET_RP_TITLE or not TICKET_CAPT_TITLE:
+    if any(not form.title for form in TICKET_FORMS):
         errors.append("Заголовки форм заявок не должны быть пустыми")
 
     if len(FAMQCORE_EMBED_DESCRIPTION) > DISCORD_EMBED_DESCRIPTION_MAX:
@@ -571,12 +636,14 @@ def _validate_intervals(errors: list[str]) -> None:
         errors.append("AFK_MAX_DURATION_MINUTES должен быть больше AFK_MIN_DURATION_MINUTES")
     if AFK_COOLDOWN_SECONDS < 1:
         errors.append("AFK_COOLDOWN_SECONDS должен быть положительным")
+    if VOICE_CALL_BUTTON_COOLDOWN_SECONDS < 1:
+        errors.append("VOICE_CALL_BUTTON_COOLDOWN_SECONDS должен быть положительным")
     if AFK_MAX_MENTIONS_PER_MESSAGE < 1:
         errors.append("AFK_MAX_MENTIONS_PER_MESSAGE должен быть положительным")
     if TICKET_PROCESSING_TIMEOUT_SECONDS >= TICKET_RETENTION_DAYS * 86400:
         errors.append("TICKET_PROCESSING_TIMEOUT_SECONDS не может превышать срок хранения заявок")
-    if RATELIMIT_MAX_ENTRIES < 100:
-        errors.append("RATELIMIT_MAX_ENTRIES слишком мал (< 100)")
+    if RATELIMIT_MAX_ENTRIES < MIN_RATELIMIT_ENTRIES:
+        errors.append(f"RATELIMIT_MAX_ENTRIES слишком мал (< {MIN_RATELIMIT_ENTRIES})")
 
 
 def _validate_production_safety(errors: list[str]) -> None:

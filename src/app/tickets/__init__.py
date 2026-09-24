@@ -1,7 +1,7 @@
 """Расширение заявок: команды, ретенция и reconciliation.
 
 Все фоновые задачи — Cog, поэтому ``bot.unload_extension("tickets")``
-корректно их отменяет (issue #21).
+корректно их отменяет.
 """
 
 from .commands import TicketsCog, setup as setup_commands

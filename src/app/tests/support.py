@@ -1,6 +1,6 @@
 """Общая инфраструктура тестов: временная БД и асинхронные фейки Discord.
 
-Issue #16 требует контрактных тестов на объектах, которые ведут себя как
+Тесты требуют контрактных тестов на объектах, которые ведут себя как
 настоящие: корутинные методы возвращают awaitable, а не MagicMock, иначе
 ``RuntimeWarning: coroutine was never awaited`` маскирует реальные ошибки.
 
@@ -44,7 +44,7 @@ def label_of(item) -> str | None:
     """Подпись элемента формы без обращения к устаревшему свойству.
 
     ``discord.ui.TextInput.label`` помечен deprecated в discord.py 2.6+,
-    а тесты запускаются с DeprecationWarning как ошибкой (issue #16).
+    а тесты запускаются с DeprecationWarning как ошибкой.
     Значение читается из нижележащего компонента, который и хранит его.
     """
     underlying = getattr(item, "_underlying", None)
@@ -221,7 +221,13 @@ class FakeChannel:
         self._messages = list(messages)
 
     def history(self, *args, **kwargs) -> AsyncIterator:
-        return AsyncIterator(self._messages)
+        messages = list(self._messages)
+        if not kwargs.get("oldest_first", False):
+            messages.reverse()
+        limit = kwargs.get("limit")
+        if isinstance(limit, int):
+            messages = messages[:limit]
+        return AsyncIterator(messages)
 
     def archived_threads(self, *args, **kwargs) -> AsyncIterator:
         return AsyncIterator(self._archived)
@@ -263,6 +269,7 @@ class FakeGuild:
         self.text_channels = [c for c in channels if isinstance(c, FakeChannel)]
         self.create_text_channel = AsyncMock()
         self.fetch_channel = AsyncMock(side_effect=make_not_found())
+        self.fetch_member = AsyncMock(side_effect=make_not_found())
 
     def get_channel(self, channel_id: int):
         return self._channels.get(channel_id)

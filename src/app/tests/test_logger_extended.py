@@ -24,6 +24,22 @@ class TestColoredFormatter(unittest.TestCase):
         self.assertIn("INFO", result)
         self.assertIn("test message", result)
 
+    def test_format_does_not_mutate_shared_log_record(self):
+        formatter = ColoredFormatter("%(levelname)s - %(message)s")
+        record = logging.LogRecord(
+            name="test",
+            level=logging.INFO,
+            pathname="",
+            lineno=0,
+            msg="test message",
+            args=(),
+            exc_info=None,
+        )
+
+        formatter.format(record)
+
+        self.assertEqual(record.levelname, "INFO")
+
     def test_format_debug_color(self):
         formatter = ColoredFormatter("%(levelname)s - %(message)s")
         record = logging.LogRecord(

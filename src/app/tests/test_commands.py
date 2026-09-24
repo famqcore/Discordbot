@@ -86,7 +86,7 @@ class TestStatsCommand(unittest.TestCase):
         ctx = MagicMock()
         ctx.send = AsyncMock()
 
-        with patch("tickets.commands.get_stats") as mock_stats:
+        with patch("tickets.commands.async_get_stats") as mock_stats:
             mock_stats.return_value = {
                 "total": 10,
                 "accepted": 5,
@@ -150,7 +150,7 @@ class TestHistoryCommand(unittest.TestCase):
         ctx = MagicMock()
         ctx.send = AsyncMock()
 
-        with patch("tickets.commands.get_all_tickets") as mock_tickets:
+        with patch("tickets.commands.async_get_all_tickets") as mock_tickets:
             mock_tickets.return_value = []
             self.loop.run_until_complete(self.cog.show_history.callback(self.cog, ctx, 10))
 
@@ -168,7 +168,7 @@ class TestHistoryCommand(unittest.TestCase):
             "status": "accepted",
         }
 
-        with patch("tickets.commands.get_all_tickets") as mock_tickets:
+        with patch("tickets.commands.async_get_all_tickets") as mock_tickets:
             mock_tickets.return_value = [mock_ticket]
             self.loop.run_until_complete(self.cog.show_history.callback(self.cog, ctx, 10))
 

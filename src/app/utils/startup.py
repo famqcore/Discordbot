@@ -10,6 +10,7 @@
 """
 
 import discord
+from discord.ext import commands
 
 import config
 from utils.logcenter import validate_log_center_config
@@ -28,7 +29,7 @@ def _access_role_specs() -> tuple:
     )
 
 
-async def validate_guild_infrastructure(guild) -> list[str]:
+async def validate_guild_infrastructure(guild: discord.Guild) -> list[str]:
     """Проверяет все заданные ID одного сервера. Пустой список — всё ок."""
     problems = []
 
@@ -55,7 +56,7 @@ async def validate_guild_infrastructure(guild) -> list[str]:
     return problems
 
 
-async def check_startup(bot) -> bool:
+async def check_startup(bot: commands.Bot) -> bool:
     """Разовая проверка всех серверов после подключения.
 
     Возвращает True, если конфигурация в порядке. В production при проблемах
@@ -66,8 +67,8 @@ async def check_startup(bot) -> bool:
     for guild in bot.guilds:
         try:
             problems = await validate_guild_infrastructure(guild)
-        except Exception as e:
-            problems = [f"не удалось проверить конфигурацию сервера: {e}"]
+        except Exception as error:  # noqa: BLE001 - один сервер не должен скрыть проблемы других
+            problems = [f"не удалось проверить конфигурацию сервера: {error}"]
         guild_name = getattr(guild, "name", "?")
         guild_id = getattr(guild, "id", "?")
         all_problems.extend(f"[{guild_name} ({guild_id})] {p}" for p in problems)

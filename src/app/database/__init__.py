@@ -1,5 +1,6 @@
 from . import db, state_db
 from .afk_db import (
+    AfkSetResult,
     check_cooldown,
     cleanup_cooldowns,
     delete_user_data,
@@ -96,6 +97,7 @@ __all__ = [
     "add_log_message_id",
     "parse_log_message_refs",
     # afk_db
+    "AfkSetResult",
     "init_afk_db",
     "set_afk",
     "take_afk",

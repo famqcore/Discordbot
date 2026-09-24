@@ -1,4 +1,4 @@
-"""Терминальные действия по заявке: закрытие и решение (issue #3).
+"""Терминальные действия по заявке: закрытие и решение.
 
 Проверяется идемпотентность (двойной клик, гонка), порядок шагов и
 поведение при ошибках Discord: канал не должен исчезать раньше, чем
@@ -110,7 +110,7 @@ class CloseButtonTestCase(TerminalActionTestCase):
         self.channel.delete.assert_awaited_once()
 
     async def test_double_click_closes_once(self):
-        """Issue #3: два клика подряд — одно закрытие, один лог, одно удаление."""
+        """Два клика подряд дают одно закрытие, один лог и одно удаление."""
         first = self.interaction()
         second = self.interaction()
 
@@ -156,6 +156,32 @@ class CloseButtonTestCase(TerminalActionTestCase):
         mock_log.assert_not_awaited()
         self.assertEqual(self.ticket()["status"], STATUS_OPEN)
 
+    async def test_ticket_lookup_failure_is_reported_by_boundary(self):
+        interaction = self.interaction()
+
+        with patch(
+            "tickets.close_ticket.ticket_for_channel",
+            new_callable=AsyncMock,
+            side_effect=RuntimeError("database unavailable"),
+        ):
+            await CloseButton().callback(interaction)
+
+        self.assertEqual(self.ticket()["status"], STATUS_OPEN)
+        self.assertTrue(any("Код ошибки" in text for text in interaction.sent_texts()))
+
+    async def test_unexpected_failure_releases_close_claim(self):
+        interaction = self.interaction()
+
+        with patch(
+            "tickets.close_ticket.complete_terminal_action",
+            new_callable=AsyncMock,
+            side_effect=RuntimeError("unexpected failure"),
+        ):
+            await CloseButton().callback(interaction)
+
+        self.assertEqual(self.ticket()["status"], STATUS_OPEN)
+        self.assertTrue(any("Код ошибки" in text for text in interaction.sent_texts()))
+
     async def test_transcript_failure_keeps_channel_and_reopens(self):
         """Переписку сохранить не удалось — канал остаётся, статус возвращается."""
         self.channel.history = MagicMock(side_effect=make_forbidden())
@@ -165,6 +191,7 @@ class CloseButtonTestCase(TerminalActionTestCase):
             await CloseButton().callback(interaction)
 
         mock_log.assert_not_awaited()
+        self.applicant.send.assert_not_awaited()
         self.channel.delete.assert_not_awaited()
         self.assertEqual(self.ticket()["status"], STATUS_OPEN)
         interaction.followup.send.assert_awaited_once()
@@ -196,6 +223,16 @@ class CloseButtonTestCase(TerminalActionTestCase):
 
         self.assertEqual(self.ticket()["status"], STATUS_CLOSED)
         self.channel.delete.assert_awaited_once()
+
+    async def test_missing_audit_message_releases_ticket_for_retry(self):
+        interaction = self.interaction()
+
+        with patch("tickets.workflow.send_to_log", new_callable=AsyncMock, return_value=None):
+            await CloseButton().callback(interaction)
+
+        self.assertEqual(self.ticket()["status"], STATUS_OPEN)
+        self.channel.delete.assert_not_awaited()
+        self.applicant.send.assert_not_awaited()
 
     async def test_channel_delete_failure_keeps_status_closed(self):
         """Канал не удалился — статус уже терминальный, уборку доделает reconcile."""
@@ -266,8 +303,34 @@ class DecisionTestCase(TerminalActionTestCase):
         self.channel.delete.assert_not_awaited()
         self.assertIn(config.TICKET_ALREADY_DECIDED, interaction.sent_texts())
 
+    async def test_ticket_lookup_failure_is_reported_by_boundary(self):
+        interaction = self.interaction()
+
+        with patch(
+            "tickets.decision.ticket_for_channel",
+            new_callable=AsyncMock,
+            side_effect=RuntimeError("database unavailable"),
+        ):
+            await self.modal().on_submit(interaction)
+
+        self.assertEqual(self.ticket()["status"], STATUS_OPEN)
+        self.assertTrue(any("Код ошибки" in text for text in interaction.sent_texts()))
+
+    async def test_unexpected_failure_releases_decision_claim(self):
+        interaction = self.interaction()
+
+        with patch(
+            "tickets.decision.complete_terminal_action",
+            new_callable=AsyncMock,
+            side_effect=RuntimeError("unexpected failure"),
+        ):
+            await self.modal().on_submit(interaction)
+
+        self.assertEqual(self.ticket()["status"], STATUS_OPEN)
+        self.assertTrue(any("Код ошибки" in text for text in interaction.sent_texts()))
+
     async def test_accept_then_deny_race_single_decision(self):
-        """Issue #3: одновременные «Принять» и «Отказать» — побеждает один."""
+        """Одновременные «Принять» и «Отказать» обрабатываются один раз."""
         import asyncio
 
         accept = self.interaction()
@@ -301,6 +364,21 @@ class DecisionTestCase(TerminalActionTestCase):
             await self.modal().on_submit(interaction)
 
         self.assertEqual(self.ticket()["status"], STATUS_ACCEPTED)
+
+    async def test_retryable_log_error_does_not_notify_about_reverted_decision(self):
+        interaction = self.interaction()
+
+        with patch(
+            "tickets.workflow.send_to_log",
+            new_callable=AsyncMock,
+            side_effect=http_exception(503),
+        ):
+            await self.modal().on_submit(interaction)
+
+        self.assertEqual(self.ticket()["status"], STATUS_OPEN)
+        self.applicant.send.assert_not_awaited()
+        self.channel.send.assert_not_awaited()
+        self.channel.delete.assert_not_awaited()
 
 
 class WorkflowStateTestCase(TerminalActionTestCase):
@@ -356,7 +434,7 @@ class WorkflowStateTestCase(TerminalActionTestCase):
 
 
 class TranscriptTestCase(unittest.IsolatedAsyncioTestCase):
-    """Issue #19: состав и полнота снимка переписки."""
+    """Состав и полнота снимка переписки."""
 
     def _channel(self, messages):
         guild = FakeGuild(guild_id=1, name="Guild")
@@ -415,6 +493,22 @@ class TranscriptTestCase(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(transcript.complete)
         self.assertIn("обрезана", transcript.status_note())
 
+    async def test_truncated_history_keeps_latest_messages_in_chronological_order(self):
+        channel = self._channel(
+            [
+                FakeMessage(message_id=1, content="oldest"),
+                FakeMessage(message_id=2, content="middle"),
+                FakeMessage(message_id=3, content="latest"),
+            ]
+        )
+
+        transcript = await build_transcript(channel, limit=2)
+        content = transcript.files[0].fp.read().decode("utf-8")
+
+        self.assertTrue(transcript.truncated)
+        self.assertNotIn("oldest", content)
+        self.assertLess(content.index("middle"), content.index("latest"))
+
     async def test_large_history_is_size_limited(self):
         # немного очень больших сообщений быстрее, чем тысячи мелких
         messages = [FakeMessage(message_id=i, content="x" * 200_000) for i in range(40)]
@@ -453,6 +547,10 @@ class TranscriptTestCase(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(transcript.message_count, 0)
         self.assertIsNone(await build_transcript_file(channel))
         self.assertFalse(transcript.failed)
+
+    async def test_rejects_message_limit_outside_supported_range(self):
+        with self.assertRaises(ValueError):
+            await build_transcript(self._channel([]), limit=0)
 
 
 if __name__ == "__main__":

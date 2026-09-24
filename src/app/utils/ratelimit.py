@@ -1,4 +1,4 @@
-"""In-memory rate limiter с ограниченной памятью (issue #15).
+"""In-memory rate limiter с ограниченной памятью.
 
 Свойства:
 

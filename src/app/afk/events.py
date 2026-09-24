@@ -5,7 +5,7 @@
 модератор (``!afk_remove``) или сам участник кнопкой «Отменить AFK».
 Обработчика ``on_voice_state_update`` здесь намеренно нет.
 
-Защита от burst-нагрузки (issue #10):
+Защита от burst-нагрузки:
 
 - упоминания дедуплицируются, бот и автор сообщения исключаются;
 - проверяется не больше ``AFK_MAX_MENTIONS_PER_MESSAGE`` участников,
@@ -18,7 +18,7 @@
 - пропуски логируются агрегированно, без текста сообщений и имён.
 
 Обработчик зарегистрирован как ``Cog.listener``, поэтому не перетирает
-другие ``on_message`` и не отменяет ``process_commands`` (issue #21).
+другие ``on_message`` и не отменяет ``process_commands``.
 """
 
 from __future__ import annotations
@@ -33,10 +33,10 @@ from utils.mentions import escape_user_text, mentions_for
 from utils.ratelimit import allow_within_window
 
 from .models import (
-    cancel_reply,
-    check_and_reply,
+    async_cancel_reply,
+    async_check_and_reply,
+    async_get_afk_users,
     format_duration,
-    get_afk_users,
     session_duration,
 )
 
@@ -98,7 +98,7 @@ class AfkEventsCog(commands.Cog):
             return
 
         guild_id = message.guild.id
-        afk_rows = get_afk_users(guild_id, mention_ids)
+        afk_rows = await async_get_afk_users(guild_id, mention_ids)
         if not afk_rows:
             return
 
@@ -124,12 +124,12 @@ class AfkEventsCog(commands.Cog):
 
         by_id = {entity.id: entity for entity in message.mentions}
         for user_id, row in afk_rows.items():
-            if not check_and_reply(author_id, user_id, guild_id):
+            if not await async_check_and_reply(author_id, user_id, guild_id):
                 skipped += 1
                 continue
             member = by_id.get(user_id)
             if member is None:
-                cancel_reply(author_id, user_id, guild_id)
+                await async_cancel_reply(author_id, user_id, guild_id)
                 continue
             entries.append((member, row))
             reserved.append(user_id)
@@ -156,7 +156,7 @@ class AfkEventsCog(commands.Cog):
             # отправка не состоялась: резерв кулдауна освобождаем,
             # иначе участник останется без автоответа до конца окна
             for user_id in reserved:
-                cancel_reply(author_id, user_id, guild_id)
+                await async_cancel_reply(author_id, user_id, guild_id)
             logger.warning(
                 f"afk.autoreply outcome=send_failed error_type={type(error).__name__} "
                 f"guild_id={guild_id} channel_id={channel_id} recipients={len(entries)}"

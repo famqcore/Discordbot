@@ -1,4 +1,4 @@
-"""Автоответ на упоминание AFK (issues #10, #21).
+"""Автоответ на упоминание AFK.
 
 Проверяется как поведение слушателя, так и защита от burst-нагрузки:
 дедупликация, лимит проверок, один агрегированный ответ, атомарный
@@ -49,7 +49,7 @@ def afk_row(user_id: int, reason: str = "обед") -> dict:
 
 
 class CollectMentionsTestCase(unittest.TestCase):
-    """Issue #10: дедупликация и ограничение количества проверок."""
+    """Дедупликация и ограничение количества проверок."""
 
     def test_duplicates_collapsed(self):
         target = FakeMember(user_id=200)
@@ -119,9 +119,13 @@ class OnMessageTestCase(unittest.IsolatedAsyncioTestCase):
         self.cog = AfkEventsCog(self.bot)
 
     async def _dispatch(self, message, *, afk_rows=None, reserve=True):
-        with patch("afk.events.get_afk_users", return_value=afk_rows or {}) as mock_rows:
-            with patch("afk.events.check_and_reply", return_value=reserve) as mock_reserve:
-                with patch("afk.events.cancel_reply") as mock_cancel:
+        with patch(
+            "afk.events.async_get_afk_users", new_callable=AsyncMock, return_value=afk_rows or {}
+        ) as mock_rows:
+            with patch(
+                "afk.events.async_check_and_reply", new_callable=AsyncMock, return_value=reserve
+            ) as mock_reserve:
+                with patch("afk.events.async_cancel_reply") as mock_cancel:
                     await self.cog.on_message(message)
         return mock_rows, mock_reserve, mock_cancel
 
@@ -175,7 +179,7 @@ class OnMessageTestCase(unittest.IsolatedAsyncioTestCase):
         self.assertIn("<@200>", text)
 
     async def test_several_afk_users_aggregated_into_one_message(self):
-        """Issue #10: N упоминаний — один вызов Discord API."""
+        """N упоминаний — один вызов Discord API."""
         mentions = [FakeMember(user_id=200), FakeMember(user_id=201), FakeMember(user_id=202)]
         message = make_message(mentions=mentions)
         rows = {200: afk_row(200), 201: afk_row(201), 202: afk_row(202)}
@@ -206,7 +210,7 @@ class OnMessageTestCase(unittest.IsolatedAsyncioTestCase):
         message.channel.send.assert_not_awaited()
 
     async def test_channel_window_limits_replies(self):
-        """Issue #10: поток упоминаний в одном канале не превращается в спам."""
+        """Поток упоминаний в одном канале не превращается в спам."""
         sent = 0
         for _ in range(config.AFK_REPLY_CHANNEL_LIMIT + 3):
             message = make_message(mentions=[FakeMember(user_id=200)])
@@ -256,7 +260,7 @@ class OnMessageTestCase(unittest.IsolatedAsyncioTestCase):
 
 
 class ListenerRegistrationTestCase(unittest.IsolatedAsyncioTestCase):
-    """Issue #21: listener вместо @bot.event, команды продолжают работать."""
+    """Listener вместо @bot.event сохраняет работу команд."""
 
     async def asyncSetUp(self):
         self.bot = commands.Bot(command_prefix=config.CMD_PREFIX, intents=discord.Intents.none())

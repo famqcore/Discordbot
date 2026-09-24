@@ -35,7 +35,9 @@ class TestAfkDatabase(unittest.TestCase):
         self.assertIn("afk_stats", tables)
 
     def test_set_afk_basic(self):
-        self.db.set_afk(123, 456, "test reason", "2024-01-01T00:00:00")
+        result = self.db.set_afk(123, 456, "test reason", "2024-01-01T00:00:00")
+        self.assertTrue(result.created)
+        self.assertFalse(result.updated)
         user = self.db.get_afk_user(123, 456)
         self.assertIsNotNone(user)
         self.assertEqual(user["user_id"], 123)
@@ -51,7 +53,9 @@ class TestAfkDatabase(unittest.TestCase):
 
     def test_set_afk_update_existing(self):
         self.db.set_afk(123, 456, "reason1", "2024-01-01T00:00:00")
-        self.db.set_afk(123, 456, "reason2", "2024-01-02T00:00:00")
+        result = self.db.set_afk(123, 456, "reason2", "2024-01-02T00:00:00")
+        self.assertFalse(result.created)
+        self.assertTrue(result.updated)
         user = self.db.get_afk_user(123, 456)
         self.assertEqual(user["afk_reason"], "reason2")
 

@@ -14,14 +14,13 @@ from utils.ratelimit import retry_after
 from .duration import DurationError, format_minutes, parse_duration, parse_return_time
 from .models import (
     add_afk_nickname,
+    async_get_afk_user,
+    async_get_all_afk,
+    async_set_afk,
+    async_take_afk_session,
     format_duration,
-    get_afk_user,
-    get_all_afk,
-    mark_nick_applied,
     remove_afk_nickname,
     session_duration,
-    set_afk,
-    take_afk_session,
 )
 
 __all__ = [
@@ -33,8 +32,8 @@ __all__ = [
 ]
 
 
-def build_afk_embed(guild: discord.Guild) -> discord.Embed:
-    rows = get_all_afk(guild.id)
+async def build_afk_embed(guild: discord.Guild) -> discord.Embed:
+    rows = await async_get_all_afk(guild.id)
 
     embed = discord.Embed(title=config.AFK_MENU_TITLE, color=discord.Color.red())
     embed.add_field(name=config.AFK_MENU_TOTAL, value=f"{len(rows)} человек", inline=False)
@@ -51,8 +50,7 @@ def build_afk_embed(guild: discord.Guild) -> discord.Embed:
         expected = clock.parse_db(row.get("estimated_return"))
         return_str = clock.to_local(expected).strftime("%H:%M") if expected else "—"
         line = f"{idx}) {name} | Причина: {reason}    Ушел: {since_str} | Вернется: {return_str}"
-        # запас под лимит description (4096), иначе длинный список ломает эмбед
-        if total_len + len(line) > 3900:
+        if total_len + len(line) > config.AFK_LIST_DESCRIPTION_MAX:
             overflow += 1
             continue
         total_len += len(line) + 1
@@ -70,7 +68,7 @@ def build_afk_embed(guild: discord.Guild) -> discord.Embed:
 
 class AfkReturnView(discord.ui.View):
     def __init__(self, member: discord.Member, guild_id: int, duration_text: str):
-        super().__init__(timeout=60)
+        super().__init__(timeout=config.AFK_RETURN_VIEW_TIMEOUT_SECONDS)
         self.member = member
         self.guild_id = guild_id
         self.duration_text = duration_text
@@ -82,7 +80,7 @@ class AfkReturnView(discord.ui.View):
             return
 
         async with InteractionErrorBoundary(interaction, "afk.return"):
-            session = take_afk_session(self.member.id, self.guild_id)
+            session = await async_take_afk_session(self.member.id, self.guild_id)
             if session is None:
                 await interaction.response.send_message(config.AFK_RETURN_ERROR, ephemeral=True)
                 return
@@ -134,13 +132,13 @@ class AfkSetModal(discord.ui.Modal, title=config.AFK_MODAL_TITLE):
         label=config.AFK_MODAL_REASON_LABEL,
         placeholder=config.AFK_MODAL_REASON_PLACEHOLDER,
         required=False,
-        max_length=100,
+        max_length=config.AFK_REASON_INPUT_MAX_LENGTH,
     )
     duration = discord.ui.TextInput(
         label=config.AFK_MODAL_DURATION_LABEL,
         placeholder=config.AFK_MODAL_DURATION_PLACEHOLDER,
         required=True,
-        max_length=50,
+        max_length=config.AFK_DURATION_INPUT_MAX_LENGTH,
     )
 
     def __init__(self, member: discord.Member, guild_id: int, guild: discord.Guild):
@@ -160,25 +158,23 @@ class AfkSetModal(discord.ui.Modal, title=config.AFK_MODAL_TITLE):
 
             # исходный ник фиксируется только при старте новой сессии:
             # повторная установка AFK не должна запомнить ник с префиксом
-            existing = get_afk_user(self.member.id, self.guild_id)
+            existing = await async_get_afk_user(self.member.id, self.guild_id)
             original_nick = existing["original_nick"] if existing else self.member.nick
 
-            result = set_afk(
+            # Сначала меняем ник, затем сохраняем его результат вместе с
+            # новой сессией. Отдельный mark после редактирования оставлял
+            # неубираемый префикс, если процесс прерывался между шагами.
+            nick_applied = await add_afk_nickname(self.member) if existing is None else False
+            result = await async_set_afk(
                 self.member.id,
                 self.guild_id,
                 reason,
                 estimated_return=clock.to_db(parsed.return_at),
                 original_nick=original_nick,
-                nick_applied=False,
+                nick_applied=nick_applied,
             )
-
-            if result["created"]:
-                nick_applied = await add_afk_nickname(self.member)
-                if nick_applied:
-                    mark_nick_applied(self.member.id, self.guild_id, True)
-
             timestamp = clock.timestamp(parsed.return_at)
-            prefix = "🔴 Вы в AFK." if result["created"] else "🔄 AFK обновлён."
+            prefix = "🔴 Вы в AFK." if result.created else "🔄 AFK обновлён."
             await interaction.response.send_message(
                 f"{prefix}\nПричина: {escape_user_text(reason)}\n"
                 f"Продолжительность: {format_minutes(parsed.minutes)}\n"
@@ -201,7 +197,7 @@ class AfkSetModal(discord.ui.Modal, title=config.AFK_MODAL_TITLE):
                 "afk.set",
                 guild_id=self.guild_id,
                 user_id=self.member.id,
-                created=result["created"],
+                created=result.created,
                 minutes=parsed.minutes,
             )
 
@@ -257,7 +253,7 @@ class AfkMenuView(discord.ui.View):
             return
 
         async with InteractionErrorBoundary(interaction, "afk.return_prompt"):
-            row = get_afk_user(interaction.user.id, interaction.guild_id)
+            row = await async_get_afk_user(interaction.user.id, interaction.guild_id)
             if not row:
                 await interaction.response.send_message(config.AFK_NOT_AFK, ephemeral=True)
                 return
@@ -285,5 +281,5 @@ class AfkMenuView(discord.ui.View):
         if not await self._check_button_cooldown(interaction, "refresh"):
             return
         async with InteractionErrorBoundary(interaction, "afk.list"):
-            embed = build_afk_embed(interaction.guild)
+            embed = await build_afk_embed(interaction.guild)
             await interaction.response.send_message(embed=embed, ephemeral=True)

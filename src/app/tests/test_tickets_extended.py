@@ -26,8 +26,9 @@ from tests.support import (
 )
 from tickets.call_voice import VoiceCallButton, VoiceSelectView
 from tickets.close_ticket import CloseButton
-from tickets.create_ticket import create_ticket
+from tickets.create_ticket import TicketSubmission, create_ticket
 from tickets.decision import ACCEPT, DENY, AcceptButton, DecisionReasonModal, DenyButton
+from utils import ratelimit
 
 
 def staff_permissions(granted=True):
@@ -161,6 +162,10 @@ class DecisionSubmitTestCase(unittest.IsolatedAsyncioTestCase):
 class VoiceCallTestCase(unittest.IsolatedAsyncioTestCase):
     """Вызов на обзвон."""
 
+    def setUp(self):
+        ratelimit.reset()
+        self.addCleanup(ratelimit.reset)
+
     async def test_staff_gets_channel_picker(self):
         interaction = FakeInteraction(user=make_staff())
         interaction.channel = FakeChannel()
@@ -208,6 +213,26 @@ class VoiceCallTestCase(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(allowed.users, [applicant])
         self.assertFalse(allowed.everyone)
 
+    async def test_repeated_voice_invite_is_rate_limited(self):
+        use_temp_database(self)
+        guild = FakeGuild(guild_id=1)
+        applicant = FakeMember(user_id=456, name="applicant")
+        guild.add_member(applicant)
+        ticket_channel = FakeChannel(channel_id=123, guild=guild)
+        save_ticket(123, 456, "applicant", "RP", "rp", "{}", guild_id=1)
+        voice = MagicMock(id=77, mention="<#77>")
+        view = VoiceSelectView(ticket_channel)
+
+        with patch("tickets.call_voice.get_voice_channel", return_value=voice):
+            with patch("tickets.call_voice.send_to_log", new_callable=AsyncMock) as mock_log:
+                await view.children[0].callback(FakeInteraction(user=make_staff(), guild=guild))
+                repeated = FakeInteraction(user=make_staff(), guild=guild)
+                await view.children[0].callback(repeated)
+
+        self.assertEqual(ticket_channel.send.await_count, 2)
+        mock_log.assert_awaited_once()
+        self.assertIn("Подождите", repeated.response.send_message.await_args.args[0])
+
     async def test_voice_channel_not_found(self):
         use_temp_database(self)
         guild = FakeGuild(guild_id=1)
@@ -253,7 +278,7 @@ class CloseButtonPermissionTestCase(unittest.IsolatedAsyncioTestCase):
 
 
 class CreateTicketErrorsTestCase(unittest.IsolatedAsyncioTestCase):
-    """Issue #2: поведение при сбое на каждом шаге создания."""
+    """Поведение при сбое на каждом шаге создания."""
 
     GUILD_ID = 321
     USER_ID = 123
@@ -288,7 +313,13 @@ class CreateTicketErrorsTestCase(unittest.IsolatedAsyncioTestCase):
         started = [ctx.start() for ctx in defaults.values()]
         self.addCleanup(lambda: [ctx.stop() for ctx in defaults.values()])
         del started
-        return await create_ticket(self.interaction, config.TICKET_RP_TITLE, "rp", self.inputs)
+        return await create_ticket(
+            self.interaction,
+            TicketSubmission(
+                config.RP_FORM,
+                {label: text_input.value for label, text_input in self.inputs.items()},
+            ),
+        )
 
     async def test_role_grant_forbidden_does_not_fail_ticket(self):
         """Не выдалась роль — заявка всё равно создана."""
@@ -329,8 +360,12 @@ class CreateTicketErrorsTestCase(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(get_open_ticket_for_user(self.GUILD_ID, self.USER_ID))
 
     async def test_db_failure_removes_created_channel(self):
-        """Issue #2: запись не легла — канал не должен остаться сиротой."""
-        with patch("tickets.create_ticket.save_ticket", side_effect=sqlite3.OperationalError("x")):
+        """Если запись не сохранилась, канал не остаётся сиротой."""
+        with patch(
+            "tickets.create_ticket.async_save_ticket",
+            new_callable=AsyncMock,
+            side_effect=sqlite3.OperationalError("x"),
+        ):
             result = await self._create()
 
         self.assertIsNone(result)
@@ -343,11 +378,12 @@ class CreateTicketErrorsTestCase(unittest.IsolatedAsyncioTestCase):
         save_ticket(999, self.USER_ID, "Tester", "RP", "rp", "{}", guild_id=self.GUILD_ID)
 
         with patch(
-            "tickets.create_ticket.get_open_ticket_for_user",
+            "tickets.create_ticket.async_get_open_ticket_for_user",
             side_effect=[None, {"channel_id": 999}],
         ):
             with patch(
-                "tickets.create_ticket.save_ticket", side_effect=sqlite3.IntegrityError("unique")
+                "tickets.create_ticket.async_save_ticket",
+                side_effect=sqlite3.IntegrityError("unique"),
             ):
                 result = await self._create()
 

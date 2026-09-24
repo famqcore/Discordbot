@@ -12,16 +12,17 @@
   созданных объектов в bot_state. Управляемый канал принадлежит боту,
   поэтому дрейф прав чинится принудительно и заметно.
 
-Устойчивость к архивации (issue #22): ветка ищется не только среди
+Устойчивость к архивации: ветка ищется не только среди
 активных (``channel.threads``), но и среди архивированных — через
 ``archived_threads()`` и ``fetch_channel``. Найденная архивированная
 ветка разархивируется, поэтому история одной категории не распадается
 на дубли после автоархивации.
 
-Гарантия устойчивости: send_to_log никогда не бросает исключений наружу
-(логирование не должно ронять основную логику бота), но вернёт None,
-если отправка отклонена проверками. Каждая потеря аудита увеличивает
-счётчик ``delivery_stats()`` — длительная деградация видна оператору.
+По умолчанию send_to_log не бросает исключений наружу (логирование не
+должно ронять основную логику), но критичный вызывающий код может запросить
+``raise_http_errors`` и сам решить, нужно ли откатить операцию. Каждая
+потеря аудита увеличивает счётчик ``delivery_stats()`` — длительная
+деградация видна оператору.
 """
 
 from __future__ import annotations
@@ -72,9 +73,7 @@ def _record_delivery(outcome: str, key: str, detail: str = "") -> None:
         _consecutive_failures = 0
         return
     _consecutive_failures += 1
-    message = (
-        f"logcenter outcome={outcome} key={key} " f"consecutive_failures={_consecutive_failures}"
-    )
+    message = f"logcenter outcome={outcome} key={key} consecutive_failures={_consecutive_failures}"
     if detail:
         message = f"{message} detail={detail}"
     if _consecutive_failures >= DEGRADED_ALERT_THRESHOLD:
@@ -147,7 +146,7 @@ async def _audit_thread(guild, channel, thread) -> list[str]:
 
     Тип проверяется строго: произвольный «что-нибудь с методом send»
     destination не принимается — только ``discord.Thread`` в настроенном
-    лог-канале этого сервера (issue #22).
+    лог-канале этого сервера.
     """
     if not isinstance(thread, discord.Thread):
         return [
@@ -195,7 +194,7 @@ async def _fetch_guild_channel(guild, channel_id):
 
 
 async def _find_thread_by_name(channel, name: str):
-    """Ищет ветку по имени среди активных И архивированных (issue #22).
+    """Ищет ветку по имени среди активных И архивированных.
 
     Без просмотра архива бот после автоархивации создал бы вторую ветку
     с тем же именем, и история категории разошлась бы на две.
@@ -256,7 +255,7 @@ async def _resolve_log_channel(guild):
     # Управляемый канал: ищем сохранённый ID, чиним права при дрейфе,
     # отсутствующий — создаём приватным.
     state_key = f"log_channel:{getattr(guild, 'id', 0)}"
-    stored = state_db.get_state(state_key)
+    stored = await state_db.async_get_state(state_key)
     if stored and stored.isdigit():
         channel = await _fetch_guild_channel(guild, int(stored))
         if channel is not None:
@@ -265,12 +264,12 @@ async def _resolve_log_channel(guild):
             if await _repair_managed_channel(guild, channel):
                 return channel
             return None
-        state_db.delete_state(state_key)
+        await state_db.async_delete_state(state_key)
 
     channel = await guild.create_text_channel(
         config.LOG_CHANNEL_NAME, overwrites=_private_overwrites(guild)
     )
-    state_db.set_state(state_key, str(channel.id))
+    await state_db.async_set_state(state_key, str(channel.id))
     logger.info(f"Создал приватный лог-канал «{config.LOG_CHANNEL_NAME}»")
     return channel
 
@@ -299,7 +298,7 @@ async def _resolve_thread(guild, key: str):
         return thread
 
     state_key = f"log_thread:{getattr(guild, 'id', 0)}:{key}"
-    stored = state_db.get_state(state_key)
+    stored = await state_db.async_get_state(state_key)
     if stored and stored.isdigit():
         thread = await _fetch_guild_channel(guild, int(stored))
         if thread is not None:
@@ -310,7 +309,7 @@ async def _resolve_thread(guild, key: str):
                 f"logcenter: управляемая ветка «{key}» не прошла проверку "
                 f"({'; '.join(problems)}), пересоздаю"
             )
-        state_db.delete_state(state_key)
+        await state_db.async_delete_state(state_key)
 
     # ID не сохранён (первый запуск после обновления или потеря bot_state):
     # ищем существующую ветку по имени, включая архивированные, чтобы не
@@ -319,7 +318,7 @@ async def _resolve_thread(guild, key: str):
     if existing is not None:
         problems = await _audit_thread(guild, channel, existing)
         if not problems:
-            state_db.set_state(state_key, str(existing.id))
+            await state_db.async_set_state(state_key, str(existing.id))
             logger.info(
                 f"logcenter outcome=reused_thread key={key} thread_id={existing.id} "
                 "(ветка найдена по имени, в том числе в архиве)"
@@ -335,7 +334,7 @@ async def _resolve_thread(guild, key: str):
         type=discord.ChannelType.public_thread,
         auto_archive_duration=MAX_AUTO_ARCHIVE,
     )
-    state_db.set_state(state_key, str(thread.id))
+    await state_db.async_set_state(state_key, str(thread.id))
     logger.info(f"Создал ветку логов «{name}» в канале «{config.LOG_CHANNEL_NAME}»")
     return thread
 
@@ -375,13 +374,21 @@ async def validate_log_center_config(guild) -> list[str]:
 
 
 async def send_to_log(
-    guild, key: str, content: str | None = None, embed=None, files=None
+    guild,
+    key: str,
+    content: str | None = None,
+    embed=None,
+    files=None,
+    *,
+    raise_http_errors: bool = False,
 ) -> discord.Message | None:
     """Отправляет сообщение в проверенную ветку лог-центра.
 
     Возвращает отправленное сообщение (нужно удалению данных, чтобы потом
     стереть транскрипты) или None, если точка отправки не прошла проверку
-    приватности/конфигурации. Исключения наружу не выбрасываются.
+    приватности/конфигурации. ``raise_http_errors`` нужен транзакциям, для
+    которых отсутствие аудита требует отката; счётчики доставки обновляются
+    в обоих режимах.
     """
     if guild is None:
         return None
@@ -390,6 +397,8 @@ async def send_to_log(
         destination = await _resolve_thread(guild, key)
     except (discord.Forbidden, discord.HTTPException) as error:
         _record_delivery("failed", key, f"resolve_{type(error).__name__}")
+        if raise_http_errors:
+            raise
         return None
     except Exception as error:  # noqa: BLE001 - логирование не должно ронять бота
         logger.exception(f"logcenter outcome=resolve_error key={key}")
@@ -410,9 +419,13 @@ async def send_to_log(
         )
     except discord.Forbidden:
         _record_delivery("failed", key, "нет прав на отправку в ветку лог-центра")
+        if raise_http_errors:
+            raise
         return None
     except discord.HTTPException as error:
         _record_delivery("failed", key, f"http_{getattr(error, 'status', '?')}")
+        if raise_http_errors:
+            raise
         return None
     except Exception as error:  # noqa: BLE001 - логирование не должно ронять бота
         logger.exception(f"logcenter outcome=send_error key={key}")

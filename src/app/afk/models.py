@@ -1,6 +1,6 @@
 """Бизнес-логика AFK: сессии, ники, статистика.
 
-Правила работы с ником (issue #8):
+Правила работы с ником:
 
 - ``original_nick`` фиксируется один раз, при старте сессии, и переживает
   любое число обновлений причины/времени;
@@ -14,16 +14,22 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterable, Mapping
+from typing import Any
+
 import discord
 
 import config
 from database import afk_db
+from database.afk_db import AfkSetResult
 from utils import clock
 from utils.errors import log_event
 from utils.logger import logger
 
+AfkRecord = Mapping[str, Any]
 
-def format_duration(seconds) -> str:
+
+def format_duration(seconds: int | float) -> str:
     minutes, sec = divmod(max(int(seconds), 0), 60)
     hours, minutes = divmod(minutes, 60)
     days, hours = divmod(hours, 24)
@@ -46,12 +52,11 @@ def set_afk(
     estimated_return: str | None = None,
     original_nick: str | None = None,
     nick_applied: bool = False,
-) -> dict[str, bool]:
+) -> AfkSetResult:
     """Ставит AFK или обновляет параметры уже идущей сессии.
 
-    Возвращает ``{"created": ..., "updated": ...}``. Счётчик уходов
-    увеличивается только у новой сессии; старт и исходный ник активной
-    сессии не перезаписываются.
+    Счётчик уходов увеличивается только у новой сессии; старт и исходный
+    ник активной сессии не перезаписываются.
     """
     return afk_db.set_afk(
         user_id,
@@ -76,21 +81,21 @@ def remove_afk(user_id: int, guild_id: int) -> int | None:
     return snapshot["duration_seconds"]
 
 
-def take_afk_session(user_id: int, guild_id: int) -> dict | None:
+def take_afk_session(user_id: int, guild_id: int) -> dict[str, Any] | None:
     """Снимает AFK и возвращает полный снимок сессии победившей операции."""
     return afk_db.take_afk(user_id, guild_id)
 
 
-def get_afk_user(user_id: int, guild_id: int) -> dict | None:
+def get_afk_user(user_id: int, guild_id: int) -> dict[str, Any] | None:
     row = afk_db.get_afk_user(user_id, guild_id)
     return dict(row) if row else None
 
 
-def get_all_afk(guild_id: int) -> list[dict]:
+def get_all_afk(guild_id: int) -> list[dict[str, Any]]:
     return [dict(row) for row in afk_db.get_all_afk(guild_id)]
 
 
-def get_afk_users(guild_id: int, user_ids) -> dict[int, dict]:
+def get_afk_users(guild_id: int, user_ids: Iterable[int]) -> dict[int, dict[str, Any]]:
     """AFK-записи набора участников одним запросом: {user_id: row}."""
     return {row["user_id"]: dict(row) for row in afk_db.get_afk_users(guild_id, user_ids)}
 
@@ -110,17 +115,16 @@ def cancel_reply(mentioner_id: int, afk_user_id: int, guild_id: int = 0) -> None
     afk_db.release_cooldown(mentioner_id, afk_user_id, guild_id=guild_id)
 
 
-def get_user_stats(user_id: int, guild_id: int | None = None) -> dict | None:
+def get_user_stats(user_id: int, guild_id: int | None = None) -> dict[str, Any] | None:
     row = afk_db.get_user_stats(user_id, guild_id)
     return dict(row) if row else None
 
 
-def session_duration(row) -> int:
+def session_duration(row: AfkRecord | None) -> int:
     """Длительность текущей сессии по записи AFK."""
     if not row:
         return 0
-    value = row["afk_since"] if not isinstance(row, dict) else row.get("afk_since")
-    return clock.seconds_between(clock.parse_db(value))
+    return clock.seconds_between(clock.parse_db(row.get("afk_since")))
 
 
 # ---------------------------------------------------------------------------
@@ -133,13 +137,13 @@ def has_afk_prefix(nick: str | None) -> bool:
     return bool(nick) and nick.startswith(config.AFK_NICK_PREFIX)
 
 
-def build_afk_nickname(member) -> str:
+def build_afk_nickname(member: discord.Member) -> str:
     base = member.display_name or ""
     limit = config.DISCORD_NICK_MAX_LENGTH - len(config.AFK_NICK_PREFIX)
     return f"{config.AFK_NICK_PREFIX}{base[:limit]}"
 
 
-async def add_afk_nickname(member) -> bool:
+async def add_afk_nickname(member: discord.Member) -> bool:
     """Ставит префикс. True — ник принадлежит боту (или уже был с префиксом)."""
     if has_afk_prefix(member.nick):
         return True
@@ -163,7 +167,11 @@ async def add_afk_nickname(member) -> bool:
     return True
 
 
-async def remove_afk_nickname(member, original_nick=None, nick_applied: bool = True) -> bool:
+async def remove_afk_nickname(
+    member: discord.Member,
+    original_nick: str | None = None,
+    nick_applied: bool = True,
+) -> bool:
     """Возвращает исходный ник участника.
 
     ``original_nick=None`` означает, что до AFK server nickname не было —
@@ -207,3 +215,68 @@ async def remove_afk_nickname(member, original_nick=None, nick_applied: bool = T
 
 def mark_nick_applied(user_id: int, guild_id: int, applied: bool = True) -> None:
     afk_db.mark_nick_applied(user_id, guild_id, applied)
+
+
+# ---------------------------------------------------------------------------
+# Асинхронный API для обработчиков Discord
+# ---------------------------------------------------------------------------
+
+
+async def async_set_afk(
+    user_id: int,
+    guild_id: int,
+    reason: str,
+    estimated_return: str | None = None,
+    original_nick: str | None = None,
+    nick_applied: bool = False,
+) -> AfkSetResult:
+    return await afk_db.async_set_afk(
+        user_id,
+        guild_id,
+        reason,
+        afk_since=clock.to_db(),
+        estimated_return=estimated_return,
+        original_nick=original_nick,
+        nick_applied=nick_applied,
+    )
+
+
+async def async_take_afk_session(user_id: int, guild_id: int) -> dict[str, Any] | None:
+    snapshot = await afk_db.async_take_afk(user_id, guild_id)
+    return dict(snapshot) if snapshot else None
+
+
+async def async_get_afk_user(user_id: int, guild_id: int) -> dict[str, Any] | None:
+    row = await afk_db.async_get_afk_user(user_id, guild_id)
+    return dict(row) if row else None
+
+
+async def async_get_all_afk(guild_id: int) -> list[dict[str, Any]]:
+    return [dict(row) for row in await afk_db.async_get_all_afk(guild_id)]
+
+
+async def async_get_afk_users(guild_id: int, user_ids: Iterable[int]) -> dict[int, dict[str, Any]]:
+    rows = await afk_db.async_get_afk_users(guild_id, user_ids)
+    return {row["user_id"]: dict(row) for row in rows}
+
+
+async def async_check_and_reply(mentioner_id: int, afk_user_id: int, guild_id: int = 0) -> bool:
+    return await afk_db.async_reserve_cooldown(
+        mentioner_id,
+        afk_user_id,
+        config.AFK_COOLDOWN_SECONDS,
+        guild_id=guild_id,
+    )
+
+
+async def async_cancel_reply(mentioner_id: int, afk_user_id: int, guild_id: int = 0) -> None:
+    await afk_db.async_release_cooldown(mentioner_id, afk_user_id, guild_id=guild_id)
+
+
+async def async_get_user_stats(user_id: int, guild_id: int | None = None) -> dict[str, Any] | None:
+    row = await afk_db.async_get_user_stats(user_id, guild_id)
+    return dict(row) if row else None
+
+
+async def async_mark_nick_applied(user_id: int, guild_id: int, applied: bool = True) -> None:
+    await afk_db.async_mark_nick_applied(user_id, guild_id, applied)

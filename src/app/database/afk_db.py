@@ -1,6 +1,6 @@
 """Данные AFK: активные статусы, кулдаун автоответов, статистика.
 
-Ключевые инварианты (issues #8, #10, #11):
+Ключевые инварианты:
 
 - повторная установка AFK не перезаписывает `afk_since` и `original_nick`
   активной сессии: исходный ник обязан пережить любое число обновлений
@@ -16,11 +16,27 @@
 from __future__ import annotations
 
 import sqlite3
+from collections.abc import Callable, Iterable
+from dataclasses import dataclass
 from datetime import timedelta
+from typing import TypeVar
 
 from utils import clock
 
 from . import db
+
+T = TypeVar("T")
+
+
+@dataclass(frozen=True)
+class AfkSetResult:
+    """Итог установки AFK: новая сессия или обновление существующей."""
+
+    created: bool
+
+    @property
+    def updated(self) -> bool:
+        return not self.created
 
 
 def init_afk_db() -> None:
@@ -42,17 +58,15 @@ def set_afk(
     estimated_return: str | None = None,
     original_nick: str | None = None,
     nick_applied: bool = False,
-) -> dict[str, bool]:
+) -> AfkSetResult:
     """Ставит или обновляет AFK одной транзакцией.
 
-    Возвращает ``{"created": bool, "updated": bool}``: `created` — началась
-    новая сессия (её считает статистика), `updated` — обновлены причина и
-    время возврата уже идущей сессии. Старт сессии и исходный ник у активной
-    записи сохраняются без изменений.
+    ``created`` означает, что началась новая сессия и увеличена статистика.
+    При обновлении сохраняются время начала и исходный ник активной сессии.
     """
     started = afk_since or clock.to_db()
 
-    def operation(conn: sqlite3.Connection) -> dict[str, bool]:
+    def operation(conn: sqlite3.Connection) -> AfkSetResult:
         existing = conn.execute(
             "SELECT afk_since FROM afk_users WHERE user_id = ? AND guild_id = ?",
             (user_id, guild_id),
@@ -86,7 +100,7 @@ def set_afk(
                 """,
                 (guild_id, user_id),
             )
-            return {"created": True, "updated": False}
+            return AfkSetResult(created=True)
 
         conn.execute(
             """
@@ -96,7 +110,7 @@ def set_afk(
             """,
             (reason, estimated_return, user_id, guild_id),
         )
-        return {"created": False, "updated": True}
+        return AfkSetResult(created=False)
 
     return db.run(operation, write=True)
 
@@ -179,7 +193,7 @@ def get_afk_user(user_id: int, guild_id: int) -> sqlite3.Row | None:
     )
 
 
-def get_afk_users(guild_id: int, user_ids) -> list[sqlite3.Row]:
+def get_afk_users(guild_id: int, user_ids: Iterable[int]) -> list[sqlite3.Row]:
     """AFK-записи для набора участников одним запросом (автоответ)."""
     ids = [int(user_id) for user_id in dict.fromkeys(user_ids)]
     if not ids:
@@ -402,3 +416,89 @@ def delete_user_data(user_id: int, guild_id: int) -> dict[str, int]:
         return {"afk_users": users, "afk_stats": stats, "afk_cooldown": cooldowns}
 
     return db.run(operation, write=True)
+
+
+# ---------------------------------------------------------------------------
+# Асинхронный API для обработчиков Discord
+# ---------------------------------------------------------------------------
+
+
+async def _run_async(operation: Callable[[], T], *, write: bool = False) -> T:
+    """Выполняет синхронную операцию репозитория в потоке шлюза БД."""
+    return await db.arun(lambda _connection: operation(), write=write)
+
+
+async def async_set_afk(
+    user_id: int,
+    guild_id: int,
+    reason: str,
+    afk_since: str | None = None,
+    estimated_return: str | None = None,
+    original_nick: str | None = None,
+    nick_applied: bool = False,
+) -> AfkSetResult:
+    return await _run_async(
+        lambda: set_afk(
+            user_id,
+            guild_id,
+            reason,
+            afk_since,
+            estimated_return,
+            original_nick,
+            nick_applied,
+        ),
+        write=True,
+    )
+
+
+async def async_mark_nick_applied(user_id: int, guild_id: int, applied: bool = True) -> bool:
+    return await _run_async(lambda: mark_nick_applied(user_id, guild_id, applied), write=True)
+
+
+async def async_take_afk(user_id: int, guild_id: int) -> dict | None:
+    return await _run_async(lambda: take_afk(user_id, guild_id), write=True)
+
+
+async def async_get_afk_user(user_id: int, guild_id: int) -> sqlite3.Row | None:
+    return await _run_async(lambda: get_afk_user(user_id, guild_id))
+
+
+async def async_get_afk_users(guild_id: int, user_ids: Iterable[int]) -> list[sqlite3.Row]:
+    return await _run_async(lambda: get_afk_users(guild_id, user_ids))
+
+
+async def async_get_all_afk(guild_id: int) -> list[sqlite3.Row]:
+    return await _run_async(lambda: get_all_afk(guild_id))
+
+
+async def async_get_expired_afk(guild_id: int, now_iso: str | None = None) -> list[sqlite3.Row]:
+    return await _run_async(lambda: get_expired_afk(guild_id, now_iso))
+
+
+async def async_reserve_cooldown(
+    mentioner_id: int,
+    afk_user_id: int,
+    cooldown_seconds: int = 30,
+    guild_id: int = 0,
+) -> bool:
+    return await _run_async(
+        lambda: reserve_cooldown(mentioner_id, afk_user_id, cooldown_seconds, guild_id), write=True
+    )
+
+
+async def async_release_cooldown(mentioner_id: int, afk_user_id: int, guild_id: int = 0) -> bool:
+    return await _run_async(
+        lambda: release_cooldown(mentioner_id, afk_user_id, guild_id), write=True
+    )
+
+
+async def async_cleanup_cooldowns(before_iso: str) -> int:
+    return await _run_async(lambda: cleanup_cooldowns(before_iso), write=True)
+
+
+async def async_get_user_stats(user_id: int, guild_id: int | None = None) -> sqlite3.Row | None:
+    return await _run_async(lambda: get_user_stats(user_id, guild_id))
+
+
+async def async_delete_user_data(user_id: int, guild_id: int) -> dict[str, int]:
+    return await _run_async(lambda: delete_user_data(user_id, guild_id), write=True)

@@ -52,7 +52,7 @@ async def erase_user_data(guild, member) -> dict[str, int]:
     Возвращает счётчики обработанных объектов для отчёта администратору.
     """
     user_id = member.id
-    tickets = tickets_db.get_user_tickets(guild.id, user_id)
+    tickets = await tickets_db.async_get_user_tickets(guild.id, user_id)
 
     # открытый тикет: переписка и доступ отзываются вместе с каналом
     channels = await _delete_open_ticket_channels(guild, tickets)
@@ -64,13 +64,13 @@ async def erase_user_data(guild, member) -> dict[str, int]:
     log_messages = await delete_log_messages(guild, log_refs) if log_refs else 0
 
     # записи БД: ответы/имя/ID стираются, открытые становятся закрытыми
-    anonymized = tickets_db.anonymize_user_tickets(guild.id, user_id)
+    anonymized = await tickets_db.async_anonymize_user_tickets(guild.id, user_id)
 
     # AFK: ник восстанавливается до удаления записи, пока известен исходный
-    afk_row = afk_db.get_afk_user(user_id, guild.id)
+    afk_row = await afk_db.async_get_afk_user(user_id, guild.id)
     original_nick = afk_row["original_nick"] if afk_row else None
     nick_applied = bool(afk_row["nick_applied"]) if afk_row else False
-    afk_counts = afk_db.delete_user_data(user_id, guild.id)
+    afk_counts = await afk_db.async_delete_user_data(user_id, guild.id)
     if afk_row is not None:
         await remove_afk_nickname(member, original_nick, nick_applied=nick_applied)
 

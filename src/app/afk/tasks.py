@@ -4,7 +4,7 @@
 Возвращение в чат или в голосовой канал статус не снимает — это делает
 только этот цикл, модератор (``!afk_remove``) или сам участник кнопкой.
 
-Lifecycle (issue #21): цикл живёт на экземпляре Cog, а не в module-global.
+Lifecycle: цикл живёт на экземпляре Cog, а не в module-global.
 Задача стартует после ``wait_until_ready`` и отменяется в ``cog_unload``,
 поэтому reload расширения и несколько bot instance не оставляют висящих
 задач и не плодят дубли.
@@ -16,13 +16,13 @@ import discord
 from discord.ext import commands, tasks
 
 import config
-from database.afk_db import cleanup_cooldowns, get_expired_afk
+from database.afk_db import async_cleanup_cooldowns, async_get_expired_afk
 from utils import clock, ratelimit
 from utils.errors import guard_background, log_event
 from utils.logcenter import LOG_KEY_AFK, send_to_log
 from utils.logger import logger
 
-from .models import format_duration, remove_afk_nickname, take_afk_session
+from .models import async_take_afk_session, format_duration, remove_afk_nickname
 
 COOLDOWN_RETENTION_DAYS = 1
 
@@ -42,11 +42,10 @@ async def expire_afk_once(bot) -> int:
     for guild in bot.guilds:
         guild_id = getattr(guild, "id", None)
         try:
-            rows = get_expired_afk(guild_id, now_iso)
+            rows = await async_get_expired_afk(guild_id, now_iso)
         except Exception as error:  # noqa: BLE001 - цикл не должен падать из-за одного сервера
             logger.exception(
-                f"afk.expiry outcome=db_error error_type={type(error).__name__} "
-                f"guild_id={guild_id}"
+                f"afk.expiry outcome=db_error error_type={type(error).__name__} guild_id={guild_id}"
             )
             continue
 
@@ -63,7 +62,7 @@ async def expire_afk_once(bot) -> int:
 
             expired_total += 1
             duration = session["duration_seconds"]
-            member = guild.get_member(user_id)
+            member = await _member_from_cache_or_api(guild, user_id)
             if member is not None:
                 await _restore_member(member, session, guild_id, user_id)
 
@@ -86,9 +85,27 @@ async def expire_afk_once(bot) -> int:
     return expired_total
 
 
+async def _member_from_cache_or_api(guild, user_id: int):
+    """Находит участника, даже если Discord-клиент ещё не заполнил кэш."""
+    member = guild.get_member(user_id)
+    if member is not None:
+        return member
+
+    try:
+        return await guild.fetch_member(user_id)
+    except discord.NotFound:
+        return None  # пользователь действительно покинул сервер
+    except (discord.Forbidden, discord.HTTPException) as error:
+        logger.warning(
+            f"afk.expiry outcome=member_fetch_failed error_type={type(error).__name__} "
+            f"guild_id={getattr(guild, 'id', None)} user_id={user_id}"
+        )
+        return None
+
+
 async def _cleanup_cooldowns(now) -> None:
     cutoff = clock.to_db(clock.shift(now, days=-COOLDOWN_RETENTION_DAYS))
-    removed = cleanup_cooldowns(cutoff)
+    removed = await async_cleanup_cooldowns(cutoff)
     limiter_removed = ratelimit.cleanup()
     if removed or limiter_removed:
         logger.debug(
@@ -97,8 +114,8 @@ async def _cleanup_cooldowns(now) -> None:
         )
 
 
-def _take_session(user_id: int, guild_id: int) -> dict | None:
-    return take_afk_session(user_id, guild_id)
+async def _take_session(user_id: int, guild_id: int) -> dict | None:
+    return await async_take_afk_session(user_id, guild_id)
 
 
 async def _restore_member(member, session: dict, guild_id, user_id) -> None:

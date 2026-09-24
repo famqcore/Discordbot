@@ -1,4 +1,4 @@
-"""Ретенция заявок: удаление данных старше срока хранения (issues #6, #21)."""
+"""Ретенция заявок: удаление данных старше срока хранения."""
 
 import unittest
 from unittest.mock import AsyncMock, patch
@@ -9,7 +9,7 @@ from discord.ext import commands
 import config
 from database import tickets_db
 from database.db import run
-from database.schema import STATUS_ACCEPTED
+from database.schema import STATUS_ACCEPTED, STATUS_CLOSED, STATUS_PROCESSING
 from tests.support import (
     FakeChannel,
     FakeGuild,
@@ -122,6 +122,16 @@ class PurgeExpiredTestCase(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(purged, 1)
         self.assertIsNone(tickets_db.get_ticket(100))
 
+    async def test_processing_ticket_is_not_purged_during_terminal_action(self):
+        self._save_open(100, created_days=config.TICKET_RETENTION_DAYS + 30)
+        self.assertTrue(tickets_db.begin_transition(100, STATUS_CLOSED, self.guild.id))
+
+        with patch("tickets.retention.send_to_log", new_callable=AsyncMock):
+            purged = await purge_expired_once(self.bot)
+
+        self.assertEqual(purged, 0)
+        self.assertEqual(tickets_db.get_ticket(100)["status"], STATUS_PROCESSING)
+
     async def test_fresh_open_ticket_kept(self):
         self._save_open(100, created_days=3)
 
@@ -211,19 +221,21 @@ class PurgeExpiredTestCase(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(purged, 1)
 
-    async def test_unknown_guild_row_still_purged(self):
-        """Бота выгнали с сервера: запись всё равно должна уйти по сроку."""
+    async def test_unknown_guild_defers_purge_until_linked_logs_are_reachable(self):
         self._save_closed(100, closed_days=config.TICKET_RETENTION_DAYS + 10, guild_id=999)
+        tickets_db.add_log_message_id(100, 900, 500)
 
-        with patch("tickets.retention.send_to_log", new_callable=AsyncMock):
-            purged = await purge_expired_once(self.bot)
+        with patch("tickets.retention.delete_log_messages", new_callable=AsyncMock) as mock_logs:
+            with patch("tickets.retention.send_to_log", new_callable=AsyncMock):
+                purged = await purge_expired_once(self.bot)
 
-        self.assertEqual(purged, 1)
-        self.assertIsNone(tickets_db.get_ticket(100))
+        self.assertEqual(purged, 0)
+        self.assertIsNotNone(tickets_db.get_ticket(100))
+        mock_logs.assert_not_awaited()
 
 
 class RetentionCogLifecycleTestCase(unittest.IsolatedAsyncioTestCase):
-    """Issue #21: цикл принадлежит Cog и отменяется вместе с ним."""
+    """Цикл принадлежит Cog и отменяется вместе с ним."""
 
     async def asyncSetUp(self):
         self.bot = self._make_bot()

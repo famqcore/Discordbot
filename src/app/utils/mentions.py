@@ -9,6 +9,10 @@ Discord (роли рекрутёров из .env, участники тикет�
 адресным AllowedMentions через mentions_for().
 """
 
+from __future__ import annotations
+
+from collections.abc import Iterable
+
 import discord
 
 # Клиентский default: без массовых пингов и без ролей. user-пинги разрешены,
@@ -23,7 +27,11 @@ DEFAULT_ALLOWED_MENTIONS = discord.AllowedMentions(
 )
 
 
-def mentions_for(*, users=(), roles=()) -> discord.AllowedMentions:
+def mentions_for(
+    *,
+    users: Iterable[discord.abc.Snowflake] = (),
+    roles: Iterable[discord.abc.Snowflake] = (),
+) -> discord.AllowedMentions:
     """Адресный AllowedMentions: разрешены только перечисленные участники/роли.
 
     Используется в send-вызовах, где бот сам составляет упоминания

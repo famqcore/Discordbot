@@ -13,7 +13,7 @@
 Технические логи и бэкапы SQLite вне задачи: их ротацией управляет
 инфраструктура (docs/deployment.md).
 
-Цикл живёт на экземпляре Cog и отменяется в ``cog_unload`` (issue #21).
+Цикл живёт на экземпляре Cog и отменяется в ``cog_unload``.
 """
 
 from __future__ import annotations
@@ -35,16 +35,24 @@ from utils.logger import logger
 async def _purge_ticket(bot, ticket) -> bool:
     """Удаляет один тикет и связанный контент. True — запись БД удалена."""
     guild = bot.get_guild(ticket["guild_id"])
+    if guild is None:
+        # Без сервера нельзя удалить логи и вложенный транскрипт. Запись
+        # сохраняет ссылки до следующего прохода, когда Discord станет доступен.
+        logger.warning(
+            f"retention outcome=deferred ticket_id={ticket['id']} "
+            f"guild_id={ticket['guild_id']} reason=guild_unavailable"
+        )
+        return False
+
     try:
-        if guild is not None:
-            if ticket["status"] in ACTIVE_STATUSES:
-                channel = guild.get_channel(ticket["channel_id"])
-                if channel is not None:
-                    await channel.delete(reason="Ретенция: заявка старше срока хранения")
-            refs = tickets_db.parse_log_message_refs(ticket["log_message_ids"])
-            if refs:
-                await delete_log_messages(guild, refs)
-        return tickets_db.delete_ticket_by_id(ticket["id"])
+        if ticket["status"] in ACTIVE_STATUSES:
+            channel = guild.get_channel(ticket["channel_id"])
+            if channel is not None:
+                await channel.delete(reason="Ретенция: заявка старше срока хранения")
+        refs = tickets_db.parse_log_message_refs(ticket["log_message_ids"])
+        if refs:
+            await delete_log_messages(guild, refs)
+        return await tickets_db.async_delete_ticket_by_id(ticket["id"])
     except (discord.Forbidden, discord.HTTPException, sqlite3.Error) as error:
         logger.exception(
             f"retention outcome=purge_failed ticket_id={ticket['id']} "
@@ -58,7 +66,7 @@ async def purge_expired_once(bot) -> int:
     cutoff = clock.to_db(clock.shift(clock.utcnow(), days=-config.TICKET_RETENTION_DAYS))
     purged_per_guild: dict[int, int] = {}
 
-    for ticket in tickets_db.get_retention_expired(cutoff):
+    for ticket in await tickets_db.async_get_retention_expired(cutoff):
         if await _purge_ticket(bot, ticket):
             purged_per_guild[ticket["guild_id"]] = purged_per_guild.get(ticket["guild_id"], 0) + 1
 

@@ -5,6 +5,7 @@ import discord
 
 import config
 from afk.views import AfkMenuView, AfkReturnView, AfkSetModal, build_afk_embed, parse_return_time
+from database.afk_db import AfkSetResult
 from tests.support import label_of
 from utils import clock
 
@@ -83,19 +84,19 @@ class TestParseReturnTime(unittest.TestCase):
         self.assertIsNone(parse_return_time("30"))
 
 
-class TestBuildAfkEmbed(unittest.TestCase):
-    def test_empty_afk_list(self):
+class TestBuildAfkEmbed(unittest.IsolatedAsyncioTestCase):
+    async def test_empty_afk_list(self):
         guild = MagicMock()
         guild.id = 123
 
-        with patch("afk.views.get_all_afk") as mock_get:
+        with patch("afk.views.async_get_all_afk") as mock_get:
             mock_get.return_value = []
-            embed = build_afk_embed(guild)
+            embed = await build_afk_embed(guild)
 
         self.assertIsInstance(embed, discord.Embed)
         self.assertEqual(embed.fields[0].value, "0 человек")
 
-    def test_with_afk_users(self):
+    async def test_with_afk_users(self):
         guild = MagicMock()
         guild.id = 123
         guild.get_member = MagicMock(return_value=None)
@@ -109,15 +110,15 @@ class TestBuildAfkEmbed(unittest.TestCase):
             },
         ]
 
-        with patch("afk.views.get_all_afk") as mock_get:
+        with patch("afk.views.async_get_all_afk") as mock_get:
             mock_get.return_value = mock_rows
-            embed = build_afk_embed(guild)
+            embed = await build_afk_embed(guild)
 
         self.assertIsInstance(embed, discord.Embed)
         self.assertEqual(embed.fields[0].value, "1 человек")
         self.assertIsNotNone(embed.description)
 
-    def test_with_estimated_return(self):
+    async def test_with_estimated_return(self):
         guild = MagicMock()
         guild.id = 123
         guild.get_member = MagicMock(return_value=None)
@@ -131,13 +132,13 @@ class TestBuildAfkEmbed(unittest.TestCase):
             },
         ]
 
-        with patch("afk.views.get_all_afk") as mock_get:
+        with patch("afk.views.async_get_all_afk") as mock_get:
             mock_get.return_value = mock_rows
-            embed = build_afk_embed(guild)
+            embed = await build_afk_embed(guild)
 
         self.assertIn("12:00", embed.description)
 
-    def test_with_member_object(self):
+    async def test_with_member_object(self):
         guild = MagicMock()
         guild.id = 123
         member = MagicMock()
@@ -153,9 +154,9 @@ class TestBuildAfkEmbed(unittest.TestCase):
             },
         ]
 
-        with patch("afk.views.get_all_afk") as mock_get:
+        with patch("afk.views.async_get_all_afk") as mock_get:
             mock_get.return_value = mock_rows
-            embed = build_afk_embed(guild)
+            embed = await build_afk_embed(guild)
 
         self.assertIn("<@111>", embed.description)
 
@@ -210,7 +211,7 @@ class TestAfkMenuViewButtons(unittest.IsolatedAsyncioTestCase):
         interaction.response = MagicMock()
         interaction.response.send_message = AsyncMock()
 
-        with patch("afk.views.get_afk_user") as mock_get:
+        with patch("afk.views.async_get_afk_user") as mock_get:
             mock_get.return_value = None
             await view.return_btn.callback(interaction)
 
@@ -227,7 +228,7 @@ class TestAfkMenuViewButtons(unittest.IsolatedAsyncioTestCase):
 
         mock_row = {"afk_since": clock.to_db(clock.utcnow())}
 
-        with patch("afk.views.get_afk_user") as mock_get:
+        with patch("afk.views.async_get_afk_user") as mock_get:
             mock_get.return_value = mock_row
             await view.return_btn.callback(interaction)
 
@@ -243,7 +244,7 @@ class TestAfkMenuViewButtons(unittest.IsolatedAsyncioTestCase):
         interaction.response = MagicMock()
         interaction.response.send_message = AsyncMock()
 
-        with patch("afk.views.get_all_afk") as mock_get:
+        with patch("afk.views.async_get_all_afk") as mock_get:
             mock_get.return_value = []
             await view.refresh.callback(interaction)
 
@@ -304,7 +305,9 @@ class TestAfkReturnViewButtons(unittest.IsolatedAsyncioTestCase):
         interaction.response.edit_message = AsyncMock()
 
         session = {"duration_seconds": 3600, "original_nick": "Вася", "nick_applied": 1}
-        with patch("afk.views.take_afk_session", return_value=session):
+        with patch(
+            "afk.views.async_take_afk_session", new_callable=AsyncMock, return_value=session
+        ):
             with patch("afk.views.remove_afk_nickname", new_callable=AsyncMock) as mock_nick:
                 with patch("afk.views.send_to_log", new_callable=AsyncMock):
                     await view.confirm.callback(interaction)
@@ -322,7 +325,7 @@ class TestAfkReturnViewButtons(unittest.IsolatedAsyncioTestCase):
         interaction.response = MagicMock()
         interaction.response.send_message = AsyncMock()
 
-        with patch("afk.views.take_afk_session", return_value=None):
+        with patch("afk.views.async_take_afk_session", new_callable=AsyncMock, return_value=None):
             await view.confirm.callback(interaction)
 
         interaction.response.send_message.assert_awaited_once()
@@ -412,19 +415,18 @@ class TestAfkSetModalSubmit(unittest.IsolatedAsyncioTestCase):
         interaction.response = MagicMock()
         interaction.response.send_message = AsyncMock()
 
-        with patch("afk.views.get_afk_user", return_value=None):
+        with patch("afk.views.async_get_afk_user", new_callable=AsyncMock, return_value=None):
             with patch(
-                "afk.views.set_afk", return_value={"created": True, "updated": False}
+                "afk.views.async_set_afk",
+                new_callable=AsyncMock,
+                return_value=AfkSetResult(created=True),
             ) as mock_set:
-                with patch("afk.views.mark_nick_applied"):
-                    with patch(
-                        "afk.views.add_afk_nickname", new_callable=AsyncMock, return_value=True
-                    ):
-                        with patch("afk.views.send_to_log", new_callable=AsyncMock):
-                            await modal.on_submit(interaction)
+                with patch("afk.views.add_afk_nickname", new_callable=AsyncMock, return_value=True):
+                    with patch("afk.views.send_to_log", new_callable=AsyncMock):
+                        await modal.on_submit(interaction)
 
         interaction.response.send_message.assert_awaited_once()
-        mock_set.assert_called_once()
+        self.assertTrue(mock_set.await_args.kwargs["nick_applied"])
 
     async def test_submit_default_reason(self):
         member = MagicMock()
@@ -440,18 +442,17 @@ class TestAfkSetModalSubmit(unittest.IsolatedAsyncioTestCase):
         interaction.response = MagicMock()
         interaction.response.send_message = AsyncMock()
 
-        with patch("afk.views.get_afk_user", return_value=None):
+        with patch("afk.views.async_get_afk_user", new_callable=AsyncMock, return_value=None):
             with patch(
-                "afk.views.set_afk", return_value={"created": True, "updated": False}
+                "afk.views.async_set_afk",
+                new_callable=AsyncMock,
+                return_value=AfkSetResult(created=True),
             ) as mock_set:
-                with patch("afk.views.mark_nick_applied"):
-                    with patch(
-                        "afk.views.add_afk_nickname", new_callable=AsyncMock, return_value=True
-                    ):
-                        with patch("afk.views.send_to_log", new_callable=AsyncMock):
-                            await modal.on_submit(interaction)
+                with patch("afk.views.add_afk_nickname", new_callable=AsyncMock, return_value=True):
+                    with patch("afk.views.send_to_log", new_callable=AsyncMock):
+                        await modal.on_submit(interaction)
 
-        self.assertEqual(mock_set.call_args.args[2], config.AFK_REASON_DEFAULT)
+        self.assertEqual(mock_set.await_args.args[2], config.AFK_REASON_DEFAULT)
 
 
 if __name__ == "__main__":
