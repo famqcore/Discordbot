@@ -44,6 +44,24 @@ class TestSetupHook(unittest.IsolatedAsyncioTestCase):
         main_module.bot.startup_checked = False
 
 
+class TestBotShutdown(unittest.IsolatedAsyncioTestCase):
+    async def test_close_does_not_cancel_current_startup_task(self):
+        current = asyncio.current_task()
+        previous_task = main_module.bot._startup_task
+        cancelling_before = current.cancelling()
+        main_module.bot._startup_task = current
+        try:
+            with patch.object(commands.Bot, "close", new_callable=AsyncMock) as parent_close:
+                with patch("main.shutdown_db") as shutdown:
+                    await main_module.bot.close()
+        finally:
+            main_module.bot._startup_task = previous_task
+
+        parent_close.assert_awaited_once()
+        shutdown.assert_called_once()
+        self.assertEqual(current.cancelling(), cancelling_before)
+
+
 class TestCommandError(unittest.IsolatedAsyncioTestCase):
     def _make_ctx(self):
         ctx = MagicMock()

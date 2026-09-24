@@ -54,8 +54,13 @@ class FamqCoreBot(commands.Bot):
 
     async def close(self):
         """Корректное завершение: задачи Cog отменяются, БД закрывается."""
-        if self._startup_task is not None and not self._startup_task.done():
-            self._startup_task.cancel()
+        startup_task = self._startup_task
+        if (
+            startup_task is not None
+            and not startup_task.done()
+            and startup_task is not asyncio.current_task()
+        ):
+            startup_task.cancel()
         try:
             await super().close()
         finally:

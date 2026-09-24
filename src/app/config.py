@@ -147,7 +147,7 @@ def _timezone_env(name: str, default: str) -> str:
     return value
 
 
-TOKEN = os.getenv("TOKEN")
+TOKEN = _raw_env("TOKEN")
 DB_PATH = os.path.join(os.path.dirname(__file__), "database", "database.db")
 LOG_DIR = os.path.join(os.path.dirname(__file__), "logs")
 LOG_FILE_MAX_BYTES = 5 * 1024 * 1024
@@ -404,6 +404,9 @@ AFK_RETURN_DURATION_LABEL = "Ты отсутствовал"
 AFK_RETURN_SUCCESS = "✅ Вы вернулись!"
 AFK_RETURN_STAY = "❌ Вы остались в AFK."
 AFK_RETURN_ERROR = "Ошибка: AFK статус не найден."
+AFK_RETURN_EXPIRED = (
+    "⌛ Время подтверждения истекло. Ваш AFK-статус не изменён. Откройте меню заново."
+)
 AFK_NOT_AFK = "Вы не находитесь в AFK."
 AFK_INVALID_USER = "Это не ваше меню."
 
@@ -467,6 +470,10 @@ PRIVACY_DELETE_CONFIRM = (
 PRIVACY_DELETE_CONFIRM_BUTTON = "🗑 Да, удалить данные"
 PRIVACY_DELETE_CANCEL_BUTTON = "Отмена"
 PRIVACY_DELETE_CANCELLED = "Удаление данных отменено."
+PRIVACY_DELETE_EXPIRED = (
+    "⌛ Время подтверждения истекло, данные не удалены. " "Вызовите `!delete_user_data` заново."
+)
+VOICE_SELECT_EXPIRED = "⌛ Время выбора канала истекло. Нажмите «Вызвать на обзвон» заново."
 PRIVACY_DELETE_FAILED = (
     "⚠️ Удаление данных завершилось ошибкой. Часть данных могла остаться — "
     "подробности в логе бота, повторите команду после устранения причины."

@@ -27,6 +27,9 @@
 
 from __future__ import annotations
 
+import asyncio
+import weakref
+
 import discord
 
 import config
@@ -51,6 +54,24 @@ _DELIVERY = {"sent": 0, "rejected": 0, "failed": 0}
 # Порог подряд идущих неудач, после которого пишем CRITICAL
 DEGRADED_ALERT_THRESHOLD = 5
 _consecutive_failures = 0
+
+# Один lock на (сервер, категория лога) закрывает окно между проверкой
+# bot_state и create_thread. WeakValueDictionary не накапливает ключи
+# серверов/категорий после завершения конкурентных resolve-операций.
+_THREAD_RESOLVE_LOCKS: weakref.WeakValueDictionary[tuple[int, str], asyncio.Lock] = (
+    weakref.WeakValueDictionary()
+)
+
+
+def _thread_resolve_lock(guild, key: str) -> asyncio.Lock:
+    lock_key = (int(getattr(guild, "id", 0)), key)
+    lock = _THREAD_RESOLVE_LOCKS.get(lock_key)
+    if lock is None:
+        # Между get и присваиванием нет await: в одном event loop создание
+        # атомарно, а локальная ссылка удерживает weak value до выхода.
+        lock = asyncio.Lock()
+        _THREAD_RESOLVE_LOCKS[lock_key] = lock
+    return lock
 
 
 def delivery_stats() -> dict[str, int]:
@@ -275,6 +296,12 @@ async def _resolve_log_channel(guild):
 
 
 async def _resolve_thread(guild, key: str):
+    """Сериализует поиск/создание одной ветки, исключая ветки-дубликаты."""
+    async with _thread_resolve_lock(guild, key):
+        return await _resolve_thread_unlocked(guild, key)
+
+
+async def _resolve_thread_unlocked(guild, key: str):
     """Ветка логов: внешняя по LOG_THREAD_*_ID (строгая проверка) или управляемая."""
     channel = await _resolve_log_channel(guild)
     if channel is None or not isinstance(channel, discord.TextChannel):

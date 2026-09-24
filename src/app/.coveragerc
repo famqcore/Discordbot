@@ -1,0 +1,14 @@
+[run]
+branch = True
+relative_files = True
+source = .
+omit =
+    tests/*
+
+[report]
+fail_under = 85
+show_missing = True
+skip_covered = True
+
+[xml]
+output = coverage.xml

@@ -16,7 +16,7 @@
 
 ## Чеклист
 
-- [ ] Все тесты проходят локально: `cd src/app && TOKEN=dummy python -m unittest discover -s tests -v`
+- [ ] Все тесты проходят локально: `cd src/app && TOKEN=dummy PYTHONWARNINGS=error python -m unittest discover -s tests -t . -v`
 - [ ] Линтер и форматтер чисты: `ruff check .` и `ruff format --check .`
 - [ ] Новый функционал покрыт тестами
 - [ ] Все пользовательские тексты/настройки вынесены в `config.py`

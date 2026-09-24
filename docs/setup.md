@@ -13,7 +13,7 @@
 ```bash
 git clone https://github.com/famqcore/Discordbot.git
 cd Discordbot/src/app
-pip install -r requirements.txt
+pip install --require-hashes -r requirements.txt
 ```
 
 ## 3. Токен
@@ -92,7 +92,7 @@ python main.py
 Автотесты не запускаются внутри production-процесса. Перед первым стартом и перед обновлением выполните их отдельно:
 
 ```bash
-TOKEN=dummy python -m unittest discover -s tests -v
+TOKEN=dummy PYTHONWARNINGS=error python -m unittest discover -s tests -t . -v
 ```
 
 ## 8. Проверка

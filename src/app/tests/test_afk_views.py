@@ -225,6 +225,7 @@ class TestAfkMenuViewButtons(unittest.IsolatedAsyncioTestCase):
         interaction.guild_id = 123
         interaction.response = MagicMock()
         interaction.response.send_message = AsyncMock()
+        interaction.edit_original_response = AsyncMock()
 
         mock_row = {"afk_since": clock.to_db(clock.utcnow())}
 
@@ -235,6 +236,8 @@ class TestAfkMenuViewButtons(unittest.IsolatedAsyncioTestCase):
         interaction.response.send_message.assert_called_once()
         call_args = interaction.response.send_message.call_args
         self.assertIn("view", call_args.kwargs)
+        await call_args.kwargs["view"].on_timeout()
+        interaction.edit_original_response.assert_awaited_once()
 
     async def test_refresh_button(self):
         view = AfkMenuView()
@@ -280,6 +283,21 @@ class TestAfkReturnView(unittest.TestCase):
 
 
 class TestAfkReturnViewButtons(unittest.IsolatedAsyncioTestCase):
+    async def test_timeout_marks_ephemeral_response_expired(self):
+        member = MagicMock(id=456)
+        view = AfkReturnView(member, 123, "1 час")
+        interaction = MagicMock()
+        interaction.edit_original_response = AsyncMock()
+        view.bind_original_response(interaction)
+
+        await view.on_timeout()
+
+        interaction.edit_original_response.assert_awaited_once_with(
+            content=config.AFK_RETURN_EXPIRED,
+            embed=None,
+            view=None,
+        )
+
     async def test_confirm_wrong_user(self):
         member = MagicMock()
         member.id = 456

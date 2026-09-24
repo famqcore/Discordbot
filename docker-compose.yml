@@ -3,8 +3,17 @@ services:
     build: .
     container_name: famqcore-bot
     restart: unless-stopped
+    init: true
     env_file:
       - src/app/.env
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 100
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=16m
     volumes:
       - bot_data:/app/database
       - bot_logs:/app/logs

@@ -26,21 +26,37 @@ class VoiceCallButton(discord.ui.Button):
         if not is_staff(interaction.user):
             await interaction.response.send_message(config.TICKET_NO_PERMISSION, ephemeral=True)
             return
-        await interaction.response.send_message(
-            "Выберите канал:", view=VoiceSelectView(interaction.channel), ephemeral=True
-        )
+        view = VoiceSelectView(interaction.channel)
+        await interaction.response.send_message("Выберите канал:", view=view, ephemeral=True)
+        view.bind_original_response(interaction)
 
 
 class VoiceSelectView(discord.ui.View):
     def __init__(self, channel):
         super().__init__(timeout=config.VOICE_SELECT_VIEW_TIMEOUT_SECONDS)
         self.ticket_channel = channel
+        self._original_interaction: discord.Interaction | None = None
         for i, name in enumerate(config.VOICE_CHANNELS):
             btn = discord.ui.Button(
                 label=name, style=discord.ButtonStyle.success, custom_id=f"voice{i + 1}"
             )
             btn.callback = self.make_callback(name, i)
             self.add_item(btn)
+
+    def bind_original_response(self, interaction: discord.Interaction) -> None:
+        """Сохраняет interaction для редактирования ephemeral-ответа."""
+        self._original_interaction = interaction
+
+    async def on_timeout(self) -> None:
+        if self._original_interaction is None:
+            return
+        try:
+            await self._original_interaction.edit_original_response(
+                content=config.VOICE_SELECT_EXPIRED,
+                view=None,
+            )
+        except discord.HTTPException:
+            pass
 
     def make_callback(self, voice_name, index):
         async def callback(interaction: discord.Interaction):

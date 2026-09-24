@@ -16,8 +16,11 @@
 4. Добавьте тесты для нового поведения.
 5. Перед PR выполните:
    ```bash
+   python -m pip install --require-hashes -r src/app/requirements-dev.txt
    cd src/app
-   TOKEN=dummy python -m unittest discover -s tests -v
+   TOKEN=dummy PYTHONWARNINGS=error python -m unittest discover -s tests -t . -v
+   coverage run -m unittest discover -s tests -t .
+   coverage report --fail-under=85
    ruff check .
    ruff format --check .
    ```

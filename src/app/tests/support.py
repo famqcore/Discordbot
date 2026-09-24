@@ -314,6 +314,9 @@ class FakeInteraction:
         self.response = FakeResponse()
         self.followup = MagicMock()
         self.followup.send = AsyncMock()
+        self.edit_original_response = AsyncMock()
+        self.delete_original_response = AsyncMock()
+        self.original_response = AsyncMock(return_value=FakeMessage())
         self.client = MagicMock()
         self.message = None
 
