@@ -10,6 +10,7 @@ from utils.errors import InteractionErrorBoundary, log_event
 from utils.logcenter import LOG_KEY_CALLS, send_to_log
 from utils.mentions import mentions_for
 from utils.permissions import is_staff
+from utils.ratelimit import retry_after
 from utils.resolve import get_voice_channel
 
 
@@ -49,6 +50,20 @@ class VoiceSelectView(discord.ui.View):
         return callback
 
     async def _invite(self, interaction: discord.Interaction, voice_name: str, index: int) -> None:
+        guild_id = getattr(interaction.guild, "id", None)
+        channel_id = getattr(self.ticket_channel, "id", None)
+        if isinstance(guild_id, int) and isinstance(channel_id, int):
+            wait = retry_after(
+                ("ticket_voice", guild_id, channel_id),
+                config.VOICE_CALL_BUTTON_COOLDOWN_SECONDS,
+            )
+            if wait:
+                await interaction.response.send_message(
+                    f"⏳ Подождите {wait} сек. перед следующим вызовом на обзвон.",
+                    ephemeral=True,
+                )
+                return
+
         ticket = await async_get_ticket(self.ticket_channel.id)
         applicant = interaction.guild.get_member(ticket["user_id"]) if ticket else None
         recruiter = interaction.user

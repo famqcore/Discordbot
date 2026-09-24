@@ -179,6 +179,10 @@ class TestConfig(unittest.TestCase):
         self.assertIsInstance(config.AFK_NICK_PREFIX, str)
         self.assertEqual(config.AFK_NICK_PREFIX, "[AFK] ")
 
+    def test_voice_call_button_cooldown(self):
+        self.assertIsInstance(config.VOICE_CALL_BUTTON_COOLDOWN_SECONDS, int)
+        self.assertGreater(config.VOICE_CALL_BUTTON_COOLDOWN_SECONDS, 0)
+
 
 class TestValidate(unittest.TestCase):
     def test_current_config_valid(self):
