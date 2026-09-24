@@ -229,5 +229,24 @@ class TestAfkNickname(unittest.IsolatedAsyncioTestCase):
         member.edit.assert_called_once()
 
 
+class TestStripAfkPrefix(unittest.TestCase):
+    def test_removes_service_prefix(self):
+        self.assertEqual(models_module.strip_afk_prefix("[AFK] TestUser"), "TestUser")
+
+    def test_keeps_nick_without_prefix(self):
+        self.assertEqual(models_module.strip_afk_prefix("TestUser"), "TestUser")
+
+    def test_none_stays_none(self):
+        self.assertIsNone(models_module.strip_afk_prefix(None))
+
+    def test_prefix_only_becomes_none(self):
+        # ник, состоящий из одного префикса, означает «серверного ника не было»
+        self.assertIsNone(models_module.strip_afk_prefix("[AFK] "))
+
+    def test_prefix_in_the_middle_is_not_service(self):
+        # служебным считается только префикс в начале строки
+        self.assertEqual(models_module.strip_afk_prefix("Test [AFK] User"), "Test [AFK] User")
+
+
 if __name__ == "__main__":
     unittest.main()

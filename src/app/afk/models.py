@@ -137,6 +137,23 @@ def has_afk_prefix(nick: str | None) -> bool:
     return bool(nick) and nick.startswith(config.AFK_NICK_PREFIX)
 
 
+def strip_afk_prefix(nick: str | None) -> str | None:
+    """Ник без служебного префикса AFK (без изменений, если префикса нет).
+
+    Нужен при старте новой сессии: если прошлая сессия потерялась уже после
+    смены ника (крах между ``member.edit`` и записью в БД, либо expiry-цикл
+    не нашёл участника на сервере), текущий ник всё ещё начинается с
+    «[AFK] ». Такой префикс нельзя запоминать как ``original_nick`` — иначе
+    восстановление будет возвращать ник с префиксом бесконечно.
+    ``None`` возвращается и когда после срезания не остаётся символов:
+    это означает «серверного ника не было».
+    """
+    if nick and nick.startswith(config.AFK_NICK_PREFIX):
+        stripped = nick[len(config.AFK_NICK_PREFIX) :]
+        return stripped or None
+    return nick
+
+
 def build_afk_nickname(member: discord.Member) -> str:
     base = member.display_name or ""
     limit = config.DISCORD_NICK_MAX_LENGTH - len(config.AFK_NICK_PREFIX)

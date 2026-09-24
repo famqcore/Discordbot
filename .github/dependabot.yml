@@ -29,6 +29,17 @@ updates:
       time: "06:15"
       timezone: Etc/UTC
     open-pull-requests-limit: 2
+    ignore:
+      # pip-локи (requirements*.txt) сгенерированы под Python 3.11 и содержат
+      # хэши только cp311-совместимых артефактов. Мажорный/минорный скачок
+      # базового образа ломает `pip install --require-hashes` в Dockerfile.
+      # Патчи безопасности внутри ветки 3.11.x обновлять можно; переход на
+      # другую ветку Python — только вручную, вместе с перегенерацией
+      # lock-файлов и python-version в tests.yml (см. docs/deployment.md).
+      - dependency-name: "python"
+        update-types:
+          - "version-update:semver-major"
+          - "version-update:semver-minor"
 
   - package-ecosystem: github-actions
     directory: /

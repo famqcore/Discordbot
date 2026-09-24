@@ -471,7 +471,7 @@ PRIVACY_DELETE_CONFIRM_BUTTON = "🗑 Да, удалить данные"
 PRIVACY_DELETE_CANCEL_BUTTON = "Отмена"
 PRIVACY_DELETE_CANCELLED = "Удаление данных отменено."
 PRIVACY_DELETE_EXPIRED = (
-    "⌛ Время подтверждения истекло, данные не удалены. " "Вызовите `!delete_user_data` заново."
+    "⌛ Время подтверждения истекло, данные не удалены. Вызовите `!delete_user_data` заново."
 )
 VOICE_SELECT_EXPIRED = "⌛ Время выбора канала истекло. Нажмите «Вызвать на обзвон» заново."
 PRIVACY_DELETE_FAILED = (

@@ -472,6 +472,67 @@ class TestAfkSetModalSubmit(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(mock_set.await_args.args[2], config.AFK_REASON_DEFAULT)
 
+    async def test_submit_stale_prefix_not_captured_as_original_nick(self):
+        """Регрессия: потерянная сессия не должна запомнить ник с «[AFK] ».
+
+        Сценарий: прошлый AFK сменил ник, но запись в БД потерялась
+        (крах между ``member.edit`` и сохранением сессии, либо expiry-цикл
+        не нашёл участника). Новая сессия обязана взять исходный ник без
+        префикса — иначе восстановление будет возвращать «[AFK] …» вечно.
+        """
+        member = MagicMock()
+        member.id = 456
+        member.nick = "[AFK] Вася"
+        member.edit = AsyncMock()
+        modal = AfkSetModal(member, 123, MagicMock())
+        modal.reason = MagicMock()
+        modal.reason.value = "test reason"
+        modal.duration = MagicMock()
+        modal.duration.value = "1 час"
+
+        interaction = MagicMock()
+        interaction.response = MagicMock()
+        interaction.response.send_message = AsyncMock()
+
+        with patch("afk.views.async_get_afk_user", new_callable=AsyncMock, return_value=None):
+            with patch(
+                "afk.views.async_set_afk",
+                new_callable=AsyncMock,
+                return_value=AfkSetResult(created=True),
+            ) as mock_set:
+                with patch("afk.views.add_afk_nickname", new_callable=AsyncMock, return_value=True):
+                    with patch("afk.views.send_to_log", new_callable=AsyncMock):
+                        await modal.on_submit(interaction)
+
+        self.assertEqual(mock_set.await_args.kwargs["original_nick"], "Вася")
+
+    async def test_submit_plain_nick_captured_as_is(self):
+        member = MagicMock()
+        member.id = 456
+        member.nick = "Вася"
+        member.edit = AsyncMock()
+        modal = AfkSetModal(member, 123, MagicMock())
+        modal.reason = MagicMock()
+        modal.reason.value = "test reason"
+        modal.duration = MagicMock()
+        modal.duration.value = "1 час"
+
+        interaction = MagicMock()
+        interaction.response = MagicMock()
+        interaction.response.send_message = AsyncMock()
+
+        with patch("afk.views.async_get_afk_user", new_callable=AsyncMock, return_value=None):
+            with patch(
+                "afk.views.async_set_afk",
+                new_callable=AsyncMock,
+                return_value=AfkSetResult(created=True),
+            ) as mock_set:
+                with patch("afk.views.add_afk_nickname", new_callable=AsyncMock, return_value=True):
+                    with patch("afk.views.send_to_log", new_callable=AsyncMock):
+                        await modal.on_submit(interaction)
+
+        self.assertEqual(mock_set.await_args.kwargs["original_nick"], "Вася")
+
 
 if __name__ == "__main__":
     unittest.main()
