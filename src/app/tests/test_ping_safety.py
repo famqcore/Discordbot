@@ -157,12 +157,20 @@ class DecisionReasonPingSafetyTestCase(unittest.IsolatedAsyncioTestCase):
 
         interaction = FakeInteraction(user=moderator, guild=guild, channel=channel)
 
-        with patch("tickets.decision.ticket_for_channel", return_value={"user_id": 456}):
-            with patch("tickets.decision.claim_ticket", return_value=True):
+        async def complete_with_notification(**kwargs):
+            await kwargs["after_finalize"]()
+            return TerminalOutcome(ok=True)
+
+        with patch(
+            "tickets.decision.ticket_for_channel",
+            new_callable=AsyncMock,
+            return_value={"user_id": 456},
+        ):
+            with patch("tickets.decision.claim_ticket", new_callable=AsyncMock, return_value=True):
                 with patch(
                     "tickets.decision.complete_terminal_action",
                     new_callable=AsyncMock,
-                    return_value=TerminalOutcome(ok=True),
+                    side_effect=complete_with_notification,
                 ) as mock_complete:
                     await modal.on_submit(interaction)
 

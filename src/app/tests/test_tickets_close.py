@@ -156,6 +156,32 @@ class CloseButtonTestCase(TerminalActionTestCase):
         mock_log.assert_not_awaited()
         self.assertEqual(self.ticket()["status"], STATUS_OPEN)
 
+    async def test_ticket_lookup_failure_is_reported_by_boundary(self):
+        interaction = self.interaction()
+
+        with patch(
+            "tickets.close_ticket.ticket_for_channel",
+            new_callable=AsyncMock,
+            side_effect=RuntimeError("database unavailable"),
+        ):
+            await CloseButton().callback(interaction)
+
+        self.assertEqual(self.ticket()["status"], STATUS_OPEN)
+        self.assertTrue(any("Код ошибки" in text for text in interaction.sent_texts()))
+
+    async def test_unexpected_failure_releases_close_claim(self):
+        interaction = self.interaction()
+
+        with patch(
+            "tickets.close_ticket.complete_terminal_action",
+            new_callable=AsyncMock,
+            side_effect=RuntimeError("unexpected failure"),
+        ):
+            await CloseButton().callback(interaction)
+
+        self.assertEqual(self.ticket()["status"], STATUS_OPEN)
+        self.assertTrue(any("Код ошибки" in text for text in interaction.sent_texts()))
+
     async def test_transcript_failure_keeps_channel_and_reopens(self):
         """Переписку сохранить не удалось — канал остаётся, статус возвращается."""
         self.channel.history = MagicMock(side_effect=make_forbidden())
@@ -266,6 +292,32 @@ class DecisionTestCase(TerminalActionTestCase):
         mock_log.assert_not_awaited()
         self.channel.delete.assert_not_awaited()
         self.assertIn(config.TICKET_ALREADY_DECIDED, interaction.sent_texts())
+
+    async def test_ticket_lookup_failure_is_reported_by_boundary(self):
+        interaction = self.interaction()
+
+        with patch(
+            "tickets.decision.ticket_for_channel",
+            new_callable=AsyncMock,
+            side_effect=RuntimeError("database unavailable"),
+        ):
+            await self.modal().on_submit(interaction)
+
+        self.assertEqual(self.ticket()["status"], STATUS_OPEN)
+        self.assertTrue(any("Код ошибки" in text for text in interaction.sent_texts()))
+
+    async def test_unexpected_failure_releases_decision_claim(self):
+        interaction = self.interaction()
+
+        with patch(
+            "tickets.decision.complete_terminal_action",
+            new_callable=AsyncMock,
+            side_effect=RuntimeError("unexpected failure"),
+        ):
+            await self.modal().on_submit(interaction)
+
+        self.assertEqual(self.ticket()["status"], STATUS_OPEN)
+        self.assertTrue(any("Код ошибки" in text for text in interaction.sent_texts()))
 
     async def test_accept_then_deny_race_single_decision(self):
         """Одновременные «Принять» и «Отказать» обрабатываются один раз."""

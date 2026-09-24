@@ -19,7 +19,7 @@ from database.tickets_db import (
     async_save_ticket,
 )
 from utils import clock
-from utils.errors import log_event, new_correlation_id
+from utils.errors import InteractionErrorBoundary, log_event, new_correlation_id
 from utils.logcenter import LOG_KEY_TICKETS, send_to_log
 from utils.logger import logger
 from utils.mentions import mentions_for
@@ -95,17 +95,18 @@ class TicketModal(discord.ui.Modal):
             self.add_item(text_input)
 
     async def on_submit(self, interaction: discord.Interaction) -> None:
-        submission = TicketSubmission(
-            form=self.form,
-            answers={label: text_input.value for label, text_input in self.inputs.items()},
-        )
-        log_event(
-            "ticket.submit",
-            guild_id=getattr(interaction, "guild_id", None),
-            user_id=getattr(interaction.user, "id", None),
-            ticket_type=submission.ticket_type,
-        )
-        await create_ticket(interaction, submission)
+        async with InteractionErrorBoundary(interaction, "ticket.submit"):
+            submission = TicketSubmission(
+                form=self.form,
+                answers={label: text_input.value for label, text_input in self.inputs.items()},
+            )
+            log_event(
+                "ticket.submit",
+                guild_id=getattr(interaction, "guild_id", None),
+                user_id=getattr(interaction.user, "id", None),
+                ticket_type=submission.ticket_type,
+            )
+            await create_ticket(interaction, submission)
 
 
 def _resolve_roles(guild: discord.Guild, specs: tuple[tuple[str, str], ...]) -> list[discord.Role]:
@@ -195,16 +196,16 @@ async def create_ticket(
         await _reply(interaction, config.ERROR_TICKET_CREATE)
         return None
 
-    existing = await async_get_open_ticket_for_user(guild_id, user_id)
-    if existing:
-        await _reply(
-            interaction,
-            config.TICKET_ALREADY_OPEN.format(channel=f"<#{existing['channel_id']}>"),
-        )
-        return None
-
     channel = None
     try:
+        existing = await async_get_open_ticket_for_user(guild_id, user_id)
+        if existing:
+            await _reply(
+                interaction,
+                config.TICKET_ALREADY_OPEN.format(channel=f"<#{existing['channel_id']}>"),
+            )
+            return None
+
         channel = await _create_ticket_channel(guild, applicant, submission)
         await async_save_ticket(
             channel.id,

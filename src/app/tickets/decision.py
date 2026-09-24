@@ -14,7 +14,12 @@ from utils.logger import logger
 from utils.mentions import escape_user_text, mentions_for
 from utils.permissions import is_staff
 
-from .workflow import claim_ticket, complete_terminal_action, ticket_for_channel
+from .workflow import (
+    claim_ticket,
+    complete_terminal_action,
+    release_ticket_claim,
+    ticket_for_channel,
+)
 
 
 @dataclass(frozen=True)
@@ -74,59 +79,66 @@ class DecisionReasonModal(discord.ui.Modal):
         decision = self.decision
         channel_id = getattr(self.channel, "id", None)
         guild_id = getattr(guild, "id", None)
-
-        ticket = await ticket_for_channel(channel_id, guild_id)
-        if ticket is None:
-            await interaction.response.send_message(config.TICKET_ALREADY_DECIDED, ephemeral=True)
-            return
-
-        # захват заявки: из накликанных accept/deny/close побеждает ровно один
-        if not await claim_ticket(channel_id, decision.status, guild_id):
-            await interaction.response.send_message(config.TICKET_ALREADY_DECIDED, ephemeral=True)
-            return
+        claimed = False
 
         async with InteractionErrorBoundary(
             interaction, "ticket.decision", channel_id=channel_id, status=decision.status
         ):
-            await interaction.response.send_message(
-                f"{decision.reply_text}. Тикет обрабатывается…", ephemeral=True
-            )
-
-            applicant = guild.get_member(ticket["user_id"]) if guild else None
-            mention = applicant.mention if applicant else "—"
-            # причина — ввод модератора, но доверять ему нельзя: экранируем,
-            # чтобы из решения нельзя было собрать массовый пинг
-            reason = escape_user_text(self.reason.value)
-
-            async def notify_applicant_and_channel() -> None:
-                await _notify_applicant(applicant, decision, reason)
-                await _announce_in_channel(self.channel, decision, mention, reason, applicant)
-
-            embed = discord.Embed(
-                title=decision.embed_title,
-                color=decision.embed_color,
-                timestamp=clock.utcnow(),
-            )
-            embed.add_field(name="Заявитель", value=mention, inline=False)
-            embed.add_field(name="Причина", value=reason, inline=False)
-            embed.add_field(name="Рекрут", value=interaction.user.mention, inline=False)
-
-            outcome = await complete_terminal_action(
-                guild=guild,
-                channel=self.channel,
-                status=decision.status,
-                actor=interaction.user,
-                reason=self.reason.value,
-                embed=embed,
-                after_finalize=notify_applicant_and_channel,
-            )
-
-            if not outcome.ok:
-                await interaction.followup.send(outcome.reason, ephemeral=True)
+            ticket = await ticket_for_channel(channel_id, guild_id)
+            if ticket is None:
+                await interaction.response.send_message(config.TICKET_ALREADY_DECIDED, ephemeral=True)
                 return
 
-            if outcome.transcript_note and not outcome.transcript_note.startswith("✅"):
-                await interaction.followup.send(outcome.transcript_note, ephemeral=True)
+            # Захват заявки: из накликанных accept/deny/close побеждает ровно один.
+            claimed = await claim_ticket(channel_id, decision.status, guild_id)
+            if not claimed:
+                await interaction.response.send_message(config.TICKET_ALREADY_DECIDED, ephemeral=True)
+                return
+
+            try:
+                await interaction.response.send_message(
+                    f"{decision.reply_text}. Тикет обрабатывается…", ephemeral=True
+                )
+
+                applicant = guild.get_member(ticket["user_id"]) if guild else None
+                mention = applicant.mention if applicant else "—"
+                # причина — ввод модератора, но доверять ему нельзя: экранируем,
+                # чтобы из решения нельзя было собрать массовый пинг
+                reason = escape_user_text(self.reason.value)
+
+                async def notify_applicant_and_channel() -> None:
+                    await _notify_applicant(applicant, decision, reason)
+                    await _announce_in_channel(self.channel, decision, mention, reason, applicant)
+
+                embed = discord.Embed(
+                    title=decision.embed_title,
+                    color=decision.embed_color,
+                    timestamp=clock.utcnow(),
+                )
+                embed.add_field(name="Заявитель", value=mention, inline=False)
+                embed.add_field(name="Причина", value=reason, inline=False)
+                embed.add_field(name="Рекрут", value=interaction.user.mention, inline=False)
+
+                outcome = await complete_terminal_action(
+                    guild=guild,
+                    channel=self.channel,
+                    status=decision.status,
+                    actor=interaction.user,
+                    reason=self.reason.value,
+                    embed=embed,
+                    after_finalize=notify_applicant_and_channel,
+                )
+
+                if not outcome.ok:
+                    await interaction.followup.send(outcome.reason, ephemeral=True)
+                    return
+
+                if outcome.transcript_note and not outcome.transcript_note.startswith("✅"):
+                    await interaction.followup.send(outcome.transcript_note, ephemeral=True)
+            except BaseException:
+                if claimed:
+                    await release_ticket_claim(channel_id)
+                raise
 
 
 async def _notify_applicant(applicant, decision: Decision, reason: str) -> None:

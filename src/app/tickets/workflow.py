@@ -59,6 +59,11 @@ async def claim_ticket(channel_id: int, status: str, guild_id: int | None) -> bo
     return await async_begin_transition(channel_id, status, guild_id=guild_id)
 
 
+async def release_ticket_claim(channel_id: int) -> bool:
+    """Возвращает захваченную заявку в ``open`` после сбоя обработчика."""
+    return await async_release_transition(channel_id)
+
+
 async def complete_terminal_action(
     *,
     guild,

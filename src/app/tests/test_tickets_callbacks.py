@@ -2,6 +2,7 @@ import unittest
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import config
+from tests.support import FakeInteraction
 from tickets.commands import TicketTypeView
 from tickets.create_ticket import TicketModal
 
@@ -41,9 +42,23 @@ class TestTicketModalSubmit(unittest.IsolatedAsyncioTestCase):
         interaction.user = MagicMock()
         interaction.response = MagicMock()
 
-        with patch("tickets.create_ticket.create_ticket") as mock_create:
+        with patch("tickets.create_ticket.create_ticket", new_callable=AsyncMock) as mock_create:
             await modal.on_submit(interaction)
-            mock_create.assert_called_once()
+            mock_create.assert_awaited_once()
+
+    async def test_on_submit_reports_unexpected_failure(self):
+        modal = TicketModal(config.RP_FORM)
+        interaction = FakeInteraction()
+
+        with patch(
+            "tickets.create_ticket.create_ticket",
+            new_callable=AsyncMock,
+            side_effect=RuntimeError("database unavailable"),
+        ):
+            await modal.on_submit(interaction)
+
+        response = interaction.response.send_message.await_args.args[0]
+        self.assertIn("Код ошибки", response)
 
 
 if __name__ == "__main__":
