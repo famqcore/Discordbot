@@ -75,13 +75,13 @@ class DecisionReasonModal(discord.ui.Modal):
         channel_id = getattr(self.channel, "id", None)
         guild_id = getattr(guild, "id", None)
 
-        ticket = ticket_for_channel(channel_id, guild_id)
+        ticket = await ticket_for_channel(channel_id, guild_id)
         if ticket is None:
             await interaction.response.send_message(config.TICKET_ALREADY_DECIDED, ephemeral=True)
             return
 
         # захват заявки: из накликанных accept/deny/close побеждает ровно один
-        if not claim_ticket(channel_id, decision.status, guild_id):
+        if not await claim_ticket(channel_id, decision.status, guild_id):
             await interaction.response.send_message(config.TICKET_ALREADY_DECIDED, ephemeral=True)
             return
 

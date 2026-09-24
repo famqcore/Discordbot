@@ -5,7 +5,7 @@ from __future__ import annotations
 import discord
 
 import config
-from database.tickets_db import get_ticket
+from database.tickets_db import async_get_ticket
 from utils.errors import InteractionErrorBoundary, log_event
 from utils.logcenter import LOG_KEY_CALLS, send_to_log
 from utils.mentions import mentions_for
@@ -49,7 +49,7 @@ class VoiceSelectView(discord.ui.View):
         return callback
 
     async def _invite(self, interaction: discord.Interaction, voice_name: str, index: int) -> None:
-        ticket = get_ticket(self.ticket_channel.id)
+        ticket = await async_get_ticket(self.ticket_channel.id)
         applicant = interaction.guild.get_member(ticket["user_id"]) if ticket else None
         recruiter = interaction.user
 

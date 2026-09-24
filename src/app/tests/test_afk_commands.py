@@ -91,7 +91,7 @@ class AfkCommandTestCase(unittest.IsolatedAsyncioTestCase):
         self.assertIn("AFK", embed.title)
 
     async def test_afk_list_empty(self):
-        with patch("afk.views.get_all_afk", return_value=[]):
+        with patch("afk.views.async_get_all_afk", new_callable=AsyncMock, return_value=[]):
             await self.cog.afk_list_command.callback(self.cog, self.ctx)
 
         embed = self._embed(self.ctx.send)
@@ -107,7 +107,7 @@ class AfkCommandTestCase(unittest.IsolatedAsyncioTestCase):
             }
         ]
 
-        with patch("afk.views.get_all_afk", return_value=rows):
+        with patch("afk.views.async_get_all_afk", new_callable=AsyncMock, return_value=rows):
             await self.cog.afk_list_command.callback(self.cog, self.ctx)
 
         embed = self._embed(self.ctx.send)
@@ -124,7 +124,7 @@ class AfkCommandTestCase(unittest.IsolatedAsyncioTestCase):
             }
         ]
 
-        with patch("afk.views.get_all_afk", return_value=rows):
+        with patch("afk.views.async_get_all_afk", new_callable=AsyncMock, return_value=rows):
             await self.cog.afk_list_command.callback(self.cog, self.ctx)
 
         embed = self._embed(self.ctx.send)
@@ -133,7 +133,7 @@ class AfkCommandTestCase(unittest.IsolatedAsyncioTestCase):
     async def test_afk_check_not_afk(self):
         member = FakeMember(user_id=456, name="TestUser")
 
-        with patch("afk.commands.get_afk_user", return_value=None):
+        with patch("afk.commands.async_get_afk_user", new_callable=AsyncMock, return_value=None):
             await self.cog.afk_check_command.callback(self.cog, self.ctx, member)
 
         embed = self._embed(self.ctx.send)
@@ -147,7 +147,7 @@ class AfkCommandTestCase(unittest.IsolatedAsyncioTestCase):
             "estimated_return": None,
         }
 
-        with patch("afk.commands.get_afk_user", return_value=row):
+        with patch("afk.commands.async_get_afk_user", new_callable=AsyncMock, return_value=row):
             await self.cog.afk_check_command.callback(self.cog, self.ctx, member)
 
         embed = self._embed(self.ctx.send)
@@ -156,7 +156,7 @@ class AfkCommandTestCase(unittest.IsolatedAsyncioTestCase):
     async def test_afk_stats_no_data(self):
         member = FakeMember(user_id=456, name="TestUser")
 
-        with patch("afk.commands.get_user_stats", return_value=None):
+        with patch("afk.commands.async_get_user_stats", new_callable=AsyncMock, return_value=None):
             await self.cog.afk_stats_command.callback(self.cog, self.ctx, member)
 
         embed = self._embed(self.ctx.send)
@@ -170,7 +170,7 @@ class AfkCommandTestCase(unittest.IsolatedAsyncioTestCase):
             "longest_afk_seconds": 1800,
         }
 
-        with patch("afk.commands.get_user_stats", return_value=stats):
+        with patch("afk.commands.async_get_user_stats", new_callable=AsyncMock, return_value=stats):
             await self.cog.afk_stats_command.callback(self.cog, self.ctx, member)
 
         embed = self._embed(self.ctx.send)
@@ -210,7 +210,7 @@ class AfkRemoveCommandTestCase(unittest.IsolatedAsyncioTestCase):
     async def test_moderator_removes_afk(self):
         self._set_permissions(manage_messages=True)
 
-        with patch("afk.commands.take_afk_session", return_value=self._session()) as mock_take:
+        with patch("afk.commands.async_take_afk_session", new_callable=AsyncMock, return_value=self._session()) as mock_take:
             with patch("afk.commands.remove_afk_nickname", new_callable=AsyncMock) as mock_nick:
                 with patch("afk.commands.send_to_log", new_callable=AsyncMock) as mock_log:
                     await self.cog.afk_remove_command.callback(self.cog, self.ctx, self.member)
@@ -223,7 +223,7 @@ class AfkRemoveCommandTestCase(unittest.IsolatedAsyncioTestCase):
     async def test_member_without_afk(self):
         self._set_permissions(manage_messages=True)
 
-        with patch("afk.commands.take_afk_session", return_value=None) as mock_take:
+        with patch("afk.commands.async_take_afk_session", new_callable=AsyncMock, return_value=None) as mock_take:
             with patch("afk.commands.send_to_log", new_callable=AsyncMock) as mock_log:
                 await self.cog.afk_remove_command.callback(self.cog, self.ctx, self.member)
 
@@ -234,7 +234,7 @@ class AfkRemoveCommandTestCase(unittest.IsolatedAsyncioTestCase):
     async def test_regular_member_denied(self):
         self._set_permissions()
 
-        with patch("afk.commands.take_afk_session") as mock_take:
+        with patch("afk.commands.async_take_afk_session") as mock_take:
             await self.cog.afk_remove_command.callback(self.cog, self.ctx, self.member)
 
         mock_take.assert_not_called()
@@ -247,7 +247,7 @@ class AfkRemoveCommandTestCase(unittest.IsolatedAsyncioTestCase):
         self.ctx.author.roles = [role]
 
         with patch("utils.permissions.config.STAFF_ROLE_IDS", [777]):
-            with patch("afk.commands.take_afk_session", return_value=self._session()) as mock_take:
+            with patch("afk.commands.async_take_afk_session", new_callable=AsyncMock, return_value=self._session()) as mock_take:
                 with patch("afk.commands.remove_afk_nickname", new_callable=AsyncMock):
                     with patch("afk.commands.send_to_log", new_callable=AsyncMock):
                         await self.cog.afk_remove_command.callback(self.cog, self.ctx, self.member)
@@ -258,7 +258,7 @@ class AfkRemoveCommandTestCase(unittest.IsolatedAsyncioTestCase):
         self._set_permissions(manage_messages=True)
         session = self._session(nick_applied=0, original_nick=None)
 
-        with patch("afk.commands.take_afk_session", return_value=session):
+        with patch("afk.commands.async_take_afk_session", new_callable=AsyncMock, return_value=session):
             with patch("afk.commands.remove_afk_nickname", new_callable=AsyncMock) as mock_nick:
                 with patch("afk.commands.send_to_log", new_callable=AsyncMock):
                     await self.cog.afk_remove_command.callback(self.cog, self.ctx, self.member)

@@ -175,6 +175,25 @@ class FreshInstallTestCase(MigrationFixture):
         self.assertEqual(self.backup_files(), [])
 
 
+class LegacySchemaBackupTestCase(MigrationFixture):
+    """Данные в неверсированной legacy-БД нельзя перестраивать без бэкапа."""
+
+    def setUp(self):
+        super().setUp()
+        self.write_schema(SCHEMA_V1, version=0)
+
+    def test_backup_created_before_legacy_rebuild(self):
+        self.execute(
+            "INSERT INTO tickets (channel_id, user_id, topic, status, created_at) "
+            "VALUES (?, ?, ?, ?, ?)",
+            (100, 200, "Заявка", "open", "2024-01-01 10:00:00"),
+        )
+
+        migrate_schema(self.db_path)
+
+        self.assertEqual(len(self.backup_files()), 1)
+
+
 class UpgradeFromV1TestCase(MigrationFixture):
     """Схема v1: нет guild_id, нет CHECK, нет уникальных индексов."""
 

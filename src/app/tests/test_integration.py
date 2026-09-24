@@ -50,7 +50,7 @@ class TestIntegrationTicketsFlow(unittest.IsolatedAsyncioTestCase):
         ctx = MagicMock()
         ctx.send = AsyncMock()
 
-        with patch("tickets.commands.get_stats") as mock_stats:
+        with patch("tickets.commands.async_get_stats") as mock_stats:
             mock_stats.return_value = {
                 "total": 5,
                 "accepted": 3,
@@ -76,7 +76,7 @@ class TestIntegrationTicketsFlow(unittest.IsolatedAsyncioTestCase):
             {"topic": "CAPT", "user_id": 222, "created_at": "2024-01-02", "status": "denied"},
         ]
 
-        with patch("tickets.commands.get_all_tickets") as mock_get:
+        with patch("tickets.commands.async_get_all_tickets") as mock_get:
             mock_get.return_value = mock_tickets
             await cog.show_history.callback(cog, ctx, 10)
 
@@ -110,7 +110,7 @@ class TestIntegrationAfkFlow(unittest.IsolatedAsyncioTestCase):
         ctx.guild = MagicMock()
         ctx.guild.id = 123
 
-        with patch("afk.views.get_all_afk") as mock_get:
+        with patch("afk.views.async_get_all_afk") as mock_get:
             mock_get.return_value = []
             await cog.afk_list_command.callback(cog, ctx)
 
@@ -128,7 +128,7 @@ class TestIntegrationAfkFlow(unittest.IsolatedAsyncioTestCase):
         member.id = 456
         member.mention = "<@456>"
 
-        with patch("afk.commands.get_afk_user") as mock_get:
+        with patch("afk.commands.async_get_afk_user") as mock_get:
             mock_get.return_value = {
                 "afk_since": "2024-01-01T10:00:00",
                 "afk_reason": "test",
@@ -150,7 +150,7 @@ class TestIntegrationAfkFlow(unittest.IsolatedAsyncioTestCase):
         member.id = 456
         member.display_name = "TestUser"
 
-        with patch("afk.commands.get_user_stats") as mock_get:
+        with patch("afk.commands.async_get_user_stats") as mock_get:
             mock_get.return_value = {
                 "total_afk_count": 5,
                 "total_afk_seconds": 3600,

@@ -30,11 +30,11 @@ import discord
 
 import config
 from database.tickets_db import (
-    add_log_message_id,
-    begin_transition,
-    finalize_transition,
-    get_ticket,
-    release_transition,
+    async_add_log_message_id,
+    async_begin_transition,
+    async_finalize_transition,
+    async_get_ticket,
+    async_release_transition,
 )
 from utils.errors import is_retryable, log_event, new_correlation_id
 from utils.logcenter import LOG_KEY_DECISIONS, send_to_log
@@ -53,9 +53,9 @@ class TerminalOutcome:
     correlation_id: str | None = None
 
 
-def claim_ticket(channel_id: int, status: str, guild_id: int | None) -> bool:
+async def claim_ticket(channel_id: int, status: str, guild_id: int | None) -> bool:
     """Захватывает заявку под терминальное действие текущего сервера."""
-    return begin_transition(channel_id, status, guild_id=guild_id)
+    return await async_begin_transition(channel_id, status, guild_id=guild_id)
 
 
 async def complete_terminal_action(
@@ -76,7 +76,7 @@ async def complete_terminal_action(
 
     transcript = await build_transcript(channel)
     if transcript.failed and not _may_proceed_without_transcript(transcript):
-        release_transition(channel_id)
+        await async_release_transition(channel_id)
         logger.error(
             f"ticket.terminal outcome=transcript_failed status={status} "
             f"channel_id={channel_id} correlation_id={correlation_id}"
@@ -99,7 +99,7 @@ async def complete_terminal_action(
         )
     except discord.HTTPException as error:
         if is_retryable(error):
-            release_transition(channel_id)
+            await async_release_transition(channel_id)
             logger.warning(
                 f"ticket.terminal outcome=log_retryable status={status} "
                 f"channel_id={channel_id} error_type={type(error).__name__} "
@@ -120,9 +120,11 @@ async def complete_terminal_action(
         )
 
     if log_message is not None:
-        add_log_message_id(channel_id, log_message.channel.id, log_message.id)
+        await async_add_log_message_id(channel_id, log_message.channel.id, log_message.id)
 
-    finalized = finalize_transition(channel_id, status, closed_by=actor_id, reason=reason)
+    finalized = await async_finalize_transition(
+        channel_id, status, closed_by=actor_id, reason=reason
+    )
     if not finalized:
         # состояние успели изменить конкурентно (например erasure) —
         # повторную финализацию не делаем, канал не трогаем
@@ -175,9 +177,9 @@ async def _delete_channel(channel, status: str, actor, correlation_id: str) -> N
         )
 
 
-def ticket_for_channel(channel_id: int, guild_id: int | None):
+async def ticket_for_channel(channel_id: int, guild_id: int | None):
     """Тикет канала, если он принадлежит этому серверу."""
-    ticket = get_ticket(channel_id)
+    ticket = await async_get_ticket(channel_id)
     if ticket is None:
         return None
     if guild_id is not None and ticket["guild_id"] != guild_id:

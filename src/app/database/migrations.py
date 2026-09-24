@@ -471,7 +471,7 @@ def migrate_schema(db_path: str | None = None) -> int:
         if not pending and not needs_repair:
             return current_version
 
-        has_data = current_version > 0 and any(
+        has_data = any(
             table_exists(conn, table.name) and _row_count(conn, table.name) for table in TABLES
         )
         if has_data:

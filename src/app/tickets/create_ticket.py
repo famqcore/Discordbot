@@ -12,7 +12,12 @@ from typing import Any
 import discord
 
 import config
-from database.tickets_db import add_log_message_id, get_open_ticket_for_user, save_ticket
+from database.tickets_db import (
+    async_add_log_message_id,
+    async_delete_ticket,
+    async_get_open_ticket_for_user,
+    async_save_ticket,
+)
 from utils import clock
 from utils.errors import log_event, new_correlation_id
 from utils.logcenter import LOG_KEY_TICKETS, send_to_log
@@ -190,7 +195,7 @@ async def create_ticket(
         await _reply(interaction, config.ERROR_TICKET_CREATE)
         return None
 
-    existing = get_open_ticket_for_user(guild_id, user_id)
+    existing = await async_get_open_ticket_for_user(guild_id, user_id)
     if existing:
         await _reply(
             interaction,
@@ -201,7 +206,7 @@ async def create_ticket(
     channel = None
     try:
         channel = await _create_ticket_channel(guild, applicant, submission)
-        save_ticket(
+        await async_save_ticket(
             channel.id,
             user_id,
             applicant.name,
@@ -213,7 +218,7 @@ async def create_ticket(
         )
     except sqlite3.IntegrityError:
         await _delete_channel(channel, "Duplicate open ticket prevented", correlation_id)
-        current = get_open_ticket_for_user(guild_id, user_id)
+        current = await async_get_open_ticket_for_user(guild_id, user_id)
         channel_link = f"<#{current['channel_id']}>" if current else "уже открыта"
         await _reply(interaction, config.TICKET_ALREADY_OPEN.format(channel=channel_link))
         log_event(
@@ -248,13 +253,11 @@ async def create_ticket(
 
 async def _rollback_saved_ticket(channel: Any, correlation_id: str) -> None:
     """Удаляет канал и запись после неудачного сохранения заявки."""
-    from database.tickets_db import delete_ticket
-
     channel_id = getattr(channel, "id", None)
     removed = await _delete_channel(channel, "Rollback failed ticket creation", correlation_id)
     if channel_id is not None:
         try:
-            delete_ticket(channel_id)
+            await async_delete_ticket(channel_id)
         except sqlite3.Error as error:
             logger.exception(
                 f"ticket.create outcome=db_rollback_failed error_type={type(error).__name__} "
@@ -341,4 +344,4 @@ async def _write_creation_log(ticket: CreatedTicket) -> None:
     embed.add_field(name="Тикет", value=ticket.channel.mention, inline=True)
     log_message = await send_to_log(ticket.guild, LOG_KEY_TICKETS, embed=embed)
     if log_message is not None:
-        add_log_message_id(ticket.channel.id, log_message.channel.id, log_message.id)
+        await async_add_log_message_id(ticket.channel.id, log_message.channel.id, log_message.id)

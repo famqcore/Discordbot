@@ -174,7 +174,9 @@ class TestSendToLog(unittest.IsolatedAsyncioTestCase):
         channel.create_thread = AsyncMock(return_value=thread)
 
         mock_state = MagicMock()
-        mock_state.get_state = MagicMock(return_value=None)
+        mock_state.async_set_state = AsyncMock()
+        mock_state.async_delete_state = AsyncMock()
+        mock_state.async_get_state = AsyncMock(return_value=None)
         with patch.object(logcenter, "config", make_config(LOG_CHANNEL_ID=100)):
             with patch.object(logcenter, "state_db", mock_state):
                 result = await send_to_log(guild, "afk", content="test")
@@ -265,7 +267,9 @@ class TestManagedLogCenter(unittest.IsolatedAsyncioTestCase):
         guild.create_text_channel = AsyncMock(return_value=channel)
 
         mock_state = MagicMock()
-        mock_state.get_state = MagicMock(return_value=None)
+        mock_state.async_set_state = AsyncMock()
+        mock_state.async_delete_state = AsyncMock()
+        mock_state.async_get_state = AsyncMock(return_value=None)
 
         with patch.object(logcenter, "config", make_config()):
             with patch.object(logcenter, "state_db", mock_state):
@@ -274,7 +278,7 @@ class TestManagedLogCenter(unittest.IsolatedAsyncioTestCase):
         self.assertIsNotNone(result)
         guild.create_text_channel.assert_awaited_once()
         channel.create_thread.assert_awaited_once()
-        stored_keys = [call.args[0] for call in mock_state.set_state.call_args_list]
+        stored_keys = [call.args[0] for call in mock_state.async_set_state.call_args_list]
         self.assertIn(f"log_channel:{guild.id}", stored_keys)
         self.assertIn(f"log_thread:{guild.id}:afk", stored_keys)
 
@@ -287,7 +291,9 @@ class TestManagedLogCenter(unittest.IsolatedAsyncioTestCase):
         guild.create_text_channel = AsyncMock()
 
         mock_state = MagicMock()
-        mock_state.get_state = MagicMock(
+        mock_state.async_set_state = AsyncMock()
+        mock_state.async_delete_state = AsyncMock()
+        mock_state.async_get_state = AsyncMock(
             side_effect=lambda key: "100" if key == f"log_channel:{guild.id}" else "200"
         )
 
@@ -307,7 +313,9 @@ class TestManagedLogCenter(unittest.IsolatedAsyncioTestCase):
         guild.get_channel = MagicMock(side_effect=lambda cid: {100: channel}.get(cid))
 
         mock_state = MagicMock()
-        mock_state.get_state = MagicMock(
+        mock_state.async_set_state = AsyncMock()
+        mock_state.async_delete_state = AsyncMock()
+        mock_state.async_get_state = AsyncMock(
             side_effect=lambda key: "100" if key == f"log_channel:{guild.id}" else None
         )
 
@@ -326,7 +334,9 @@ class TestManagedLogCenter(unittest.IsolatedAsyncioTestCase):
         guild.create_text_channel = AsyncMock(return_value=new_channel)
 
         mock_state = MagicMock()
-        mock_state.get_state = MagicMock(return_value="100")  # ID, которого уже нет
+        mock_state.async_set_state = AsyncMock()
+        mock_state.async_delete_state = AsyncMock()
+        mock_state.async_get_state = AsyncMock(return_value="100")  # ID, которого уже нет
 
         with patch.object(logcenter, "config", make_config()):
             with patch.object(logcenter, "state_db", mock_state):
@@ -341,7 +351,9 @@ class TestArchivedThreadReuse(unittest.IsolatedAsyncioTestCase):
 
     def _managed_state(self, guild, channel_id="100"):
         state = MagicMock()
-        state.get_state = MagicMock(
+        state.async_set_state = AsyncMock()
+        state.async_delete_state = AsyncMock()
+        state.async_get_state = AsyncMock(
             side_effect=lambda key: channel_id if key == f"log_channel:{guild.id}" else None
         )
         return state
@@ -362,7 +374,7 @@ class TestArchivedThreadReuse(unittest.IsolatedAsyncioTestCase):
         channel.create_thread.assert_not_called()
         archived.edit.assert_awaited_once_with(archived=False)
         archived.send.assert_awaited_once()
-        state.set_state.assert_any_call(f"log_thread:{guild.id}:afk", "201")
+        state.async_set_state.assert_any_call(f"log_thread:{guild.id}:afk", "201")
 
     async def test_active_thread_preferred_over_archive_scan(self):
         guild = make_guild()

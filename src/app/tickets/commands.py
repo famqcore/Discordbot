@@ -7,7 +7,11 @@ from discord.ext import commands
 
 import config
 from database.schema import STATUS_ACCEPTED, STATUS_DENIED
-from database.tickets_db import get_all_tickets, get_open_ticket_for_user, get_stats
+from database.tickets_db import (
+    async_get_all_tickets,
+    async_get_open_ticket_for_user,
+    async_get_stats,
+)
 from utils.errors import InteractionErrorBoundary, new_correlation_id
 from utils.logger import logger
 from utils.mentions import escape_user_text, mentions_for
@@ -51,7 +55,7 @@ class TicketTypeView(discord.ui.View):
                 )
                 return
 
-            existing = get_open_ticket_for_user(guild_id, user_id)
+            existing = await async_get_open_ticket_for_user(guild_id, user_id)
             if existing:
                 channel = f"<#{existing['channel_id']}>"
                 await interaction.response.send_message(
@@ -148,7 +152,7 @@ class TicketsCog(commands.Cog):
         commands.BucketType.user,
     )
     async def show_stats(self, ctx):
-        stats = get_stats(ctx.guild.id)
+        stats = await async_get_stats(ctx.guild.id)
         embed = discord.Embed(title="Статистика заявок", color=discord.Color.gold())
         embed.add_field(name="Всего", value=stats["total"], inline=True)
         embed.add_field(name="Принято", value=stats["accepted"], inline=True)
@@ -183,7 +187,7 @@ class TicketsCog(commands.Cog):
             max(limit, config.TICKET_HISTORY_MIN_LIMIT),
             config.TICKET_HISTORY_MAX_LIMIT,
         )
-        tickets = get_all_tickets(limit=limit, guild_id=ctx.guild.id)
+        tickets = await async_get_all_tickets(limit=limit, guild_id=ctx.guild.id)
         if not tickets:
             await ctx.send("Нет заявок в истории")
             return

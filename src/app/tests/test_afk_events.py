@@ -119,9 +119,9 @@ class OnMessageTestCase(unittest.IsolatedAsyncioTestCase):
         self.cog = AfkEventsCog(self.bot)
 
     async def _dispatch(self, message, *, afk_rows=None, reserve=True):
-        with patch("afk.events.get_afk_users", return_value=afk_rows or {}) as mock_rows:
-            with patch("afk.events.check_and_reply", return_value=reserve) as mock_reserve:
-                with patch("afk.events.cancel_reply") as mock_cancel:
+        with patch("afk.events.async_get_afk_users", new_callable=AsyncMock, return_value=afk_rows or {}) as mock_rows:
+            with patch("afk.events.async_check_and_reply", new_callable=AsyncMock, return_value=reserve) as mock_reserve:
+                with patch("afk.events.async_cancel_reply") as mock_cancel:
                     await self.cog.on_message(message)
         return mock_rows, mock_reserve, mock_cancel
 

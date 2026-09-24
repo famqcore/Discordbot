@@ -23,10 +23,10 @@ from discord.ext import commands, tasks
 import config
 from database.schema import STATUS_CLOSED, STATUS_PROCESSING
 from database.tickets_db import (
-    get_active_tickets,
-    get_stale_processing,
-    release_transition,
-    update_ticket_status,
+    async_get_active_tickets,
+    async_get_stale_processing,
+    async_release_transition,
+    async_update_ticket_status,
 )
 from utils import clock
 from utils.errors import guard_background, log_event
@@ -59,9 +59,9 @@ async def reconcile_once(bot) -> dict[str, int]:
     stale_cutoff = clock.to_db(
         clock.shift(clock.utcnow(), seconds=-config.TICKET_PROCESSING_TIMEOUT_SECONDS)
     )
-    stale_ids = {row["channel_id"] for row in get_stale_processing(stale_cutoff)}
+    stale_ids = {row["channel_id"] for row in await async_get_stale_processing(stale_cutoff)}
 
-    for ticket in get_active_tickets():
+    for ticket in await async_get_active_tickets():
         guild = bot.get_guild(ticket["guild_id"])
         if guild is None:
             continue  # сервер недоступен — состояние проверим позже
@@ -74,7 +74,7 @@ async def reconcile_once(bot) -> dict[str, int]:
             continue
 
         if channel is None:
-            if update_ticket_status(
+            if await async_update_ticket_status(
                 channel_id, STATUS_CLOSED, reason=CLOSE_REASON_NO_CHANNEL, guild_id=guild.id
             ):
                 counters["closed_without_channel"] += 1
@@ -88,7 +88,7 @@ async def reconcile_once(bot) -> dict[str, int]:
             continue
 
         if ticket["status"] == STATUS_PROCESSING and channel_id in stale_ids:
-            if release_transition(channel_id):
+            if await async_release_transition(channel_id):
                 counters["released_processing"] += 1
                 log_event(
                     "ticket.reconcile",

@@ -215,3 +215,68 @@ async def remove_afk_nickname(
 
 def mark_nick_applied(user_id: int, guild_id: int, applied: bool = True) -> None:
     afk_db.mark_nick_applied(user_id, guild_id, applied)
+
+
+# ---------------------------------------------------------------------------
+# Асинхронный API для обработчиков Discord
+# ---------------------------------------------------------------------------
+
+
+async def async_set_afk(
+    user_id: int,
+    guild_id: int,
+    reason: str,
+    estimated_return: str | None = None,
+    original_nick: str | None = None,
+    nick_applied: bool = False,
+) -> AfkSetResult:
+    return await afk_db.async_set_afk(
+        user_id,
+        guild_id,
+        reason,
+        afk_since=clock.to_db(),
+        estimated_return=estimated_return,
+        original_nick=original_nick,
+        nick_applied=nick_applied,
+    )
+
+
+async def async_take_afk_session(user_id: int, guild_id: int) -> dict[str, Any] | None:
+    snapshot = await afk_db.async_take_afk(user_id, guild_id)
+    return dict(snapshot) if snapshot else None
+
+
+async def async_get_afk_user(user_id: int, guild_id: int) -> dict[str, Any] | None:
+    row = await afk_db.async_get_afk_user(user_id, guild_id)
+    return dict(row) if row else None
+
+
+async def async_get_all_afk(guild_id: int) -> list[dict[str, Any]]:
+    return [dict(row) for row in await afk_db.async_get_all_afk(guild_id)]
+
+
+async def async_get_afk_users(guild_id: int, user_ids: Iterable[int]) -> dict[int, dict[str, Any]]:
+    rows = await afk_db.async_get_afk_users(guild_id, user_ids)
+    return {row["user_id"]: dict(row) for row in rows}
+
+
+async def async_check_and_reply(mentioner_id: int, afk_user_id: int, guild_id: int = 0) -> bool:
+    return await afk_db.async_reserve_cooldown(
+        mentioner_id,
+        afk_user_id,
+        config.AFK_COOLDOWN_SECONDS,
+        guild_id=guild_id,
+    )
+
+
+async def async_cancel_reply(mentioner_id: int, afk_user_id: int, guild_id: int = 0) -> None:
+    await afk_db.async_release_cooldown(mentioner_id, afk_user_id, guild_id=guild_id)
+
+
+async def async_get_user_stats(user_id: int, guild_id: int | None = None) -> dict[str, Any] | None:
+    row = await afk_db.async_get_user_stats(user_id, guild_id)
+    return dict(row) if row else None
+
+
+async def async_mark_nick_applied(user_id: int, guild_id: int, applied: bool = True) -> None:
+    await afk_db.async_mark_nick_applied(user_id, guild_id, applied)

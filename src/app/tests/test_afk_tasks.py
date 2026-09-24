@@ -16,7 +16,7 @@ class ExpireAfkTestCase(unittest.IsolatedAsyncioTestCase):
     """Один проход авто-снятия."""
 
     def setUp(self):
-        patcher = patch("afk.tasks.cleanup_cooldowns", return_value=0)
+        patcher = patch("afk.tasks.async_cleanup_cooldowns", new_callable=AsyncMock, return_value=0)
         patcher.start()
         self.addCleanup(patcher.stop)
         limiter = patch("afk.tasks.ratelimit.cleanup", return_value=0)
@@ -47,8 +47,8 @@ class ExpireAfkTestCase(unittest.IsolatedAsyncioTestCase):
         member = FakeMember(user_id=456, name="vasya")
         bot, guild = self._make_bot(member)
 
-        with patch("afk.tasks.get_expired_afk", return_value=[{"user_id": 456}]) as mock_expired:
-            with patch("afk.tasks.take_afk_session", return_value=self._session()) as mock_take:
+        with patch("afk.tasks.async_get_expired_afk", new_callable=AsyncMock, return_value=[{"user_id": 456}]) as mock_expired:
+            with patch("afk.tasks._take_session", new_callable=AsyncMock, return_value=self._session()) as mock_take:
                 with patch("afk.tasks.remove_afk_nickname", new_callable=AsyncMock) as mock_nick:
                     with patch("afk.tasks.send_to_log", new_callable=AsyncMock) as mock_log:
                         count = await expire_afk_once(bot)
@@ -63,8 +63,8 @@ class ExpireAfkTestCase(unittest.IsolatedAsyncioTestCase):
     async def test_nothing_expired(self):
         bot, _ = self._make_bot()
 
-        with patch("afk.tasks.get_expired_afk", return_value=[]):
-            with patch("afk.tasks.take_afk_session") as mock_take:
+        with patch("afk.tasks.async_get_expired_afk", new_callable=AsyncMock, return_value=[]):
+            with patch("afk.tasks._take_session") as mock_take:
                 count = await expire_afk_once(bot)
 
         self.assertEqual(count, 0)
@@ -73,8 +73,8 @@ class ExpireAfkTestCase(unittest.IsolatedAsyncioTestCase):
     async def test_member_left_guild_still_removed(self):
         bot, _ = self._make_bot()  # участника в кэше нет
 
-        with patch("afk.tasks.get_expired_afk", return_value=[{"user_id": 456}]):
-            with patch("afk.tasks.take_afk_session", return_value=self._session()):
+        with patch("afk.tasks.async_get_expired_afk", new_callable=AsyncMock, return_value=[{"user_id": 456}]):
+            with patch("afk.tasks._take_session", new_callable=AsyncMock, return_value=self._session()):
                 with patch("afk.tasks.send_to_log", new_callable=AsyncMock) as mock_log:
                     count = await expire_afk_once(bot)
 
@@ -85,8 +85,8 @@ class ExpireAfkTestCase(unittest.IsolatedAsyncioTestCase):
         """Гонка с !afk_remove: снимает тот, кто первым забрал сессию."""
         bot, _ = self._make_bot()
 
-        with patch("afk.tasks.get_expired_afk", return_value=[{"user_id": 456}]):
-            with patch("afk.tasks.take_afk_session", return_value=None):
+        with patch("afk.tasks.async_get_expired_afk", new_callable=AsyncMock, return_value=[{"user_id": 456}]):
+            with patch("afk.tasks._take_session", new_callable=AsyncMock, return_value=None):
                 with patch("afk.tasks.send_to_log", new_callable=AsyncMock) as mock_log:
                     count = await expire_afk_once(bot)
 
@@ -104,8 +104,8 @@ class ExpireAfkTestCase(unittest.IsolatedAsyncioTestCase):
                 raise RuntimeError("db down")
             return [{"user_id": 456}]
 
-        with patch("afk.tasks.get_expired_afk", side_effect=expired):
-            with patch("afk.tasks.take_afk_session", return_value=self._session()):
+        with patch("afk.tasks.async_get_expired_afk", new_callable=AsyncMock, side_effect=expired):
+            with patch("afk.tasks._take_session", new_callable=AsyncMock, return_value=self._session()):
                 with patch("afk.tasks.send_to_log", new_callable=AsyncMock):
                     count = await expire_afk_once(bot)
 
@@ -116,8 +116,8 @@ class ExpireAfkTestCase(unittest.IsolatedAsyncioTestCase):
         member.send = AsyncMock(side_effect=make_forbidden())
         bot, _ = self._make_bot(member)
 
-        with patch("afk.tasks.get_expired_afk", return_value=[{"user_id": 456}]):
-            with patch("afk.tasks.take_afk_session", return_value=self._session()):
+        with patch("afk.tasks.async_get_expired_afk", new_callable=AsyncMock, return_value=[{"user_id": 456}]):
+            with patch("afk.tasks._take_session", new_callable=AsyncMock, return_value=self._session()):
                 with patch("afk.tasks.remove_afk_nickname", new_callable=AsyncMock):
                     with patch("afk.tasks.send_to_log", new_callable=AsyncMock) as mock_log:
                         count = await expire_afk_once(bot)
@@ -129,8 +129,8 @@ class ExpireAfkTestCase(unittest.IsolatedAsyncioTestCase):
         member = FakeMember(user_id=456)
         bot, _ = self._make_bot(member)
 
-        with patch("afk.tasks.get_expired_afk", return_value=[{"user_id": 456}]):
-            with patch("afk.tasks.take_afk_session", return_value=self._session()):
+        with patch("afk.tasks.async_get_expired_afk", new_callable=AsyncMock, return_value=[{"user_id": 456}]):
+            with patch("afk.tasks._take_session", new_callable=AsyncMock, return_value=self._session()):
                 with patch(
                     "afk.tasks.remove_afk_nickname",
                     new_callable=AsyncMock,
@@ -149,8 +149,8 @@ class ExpireAfkTestCase(unittest.IsolatedAsyncioTestCase):
         bot, _ = self._make_bot(member)
         session = self._session(nick_applied=0, original_nick=None)
 
-        with patch("afk.tasks.get_expired_afk", return_value=[{"user_id": 456}]):
-            with patch("afk.tasks.take_afk_session", return_value=session):
+        with patch("afk.tasks.async_get_expired_afk", new_callable=AsyncMock, return_value=[{"user_id": 456}]):
+            with patch("afk.tasks._take_session", new_callable=AsyncMock, return_value=session):
                 with patch("afk.tasks.remove_afk_nickname", new_callable=AsyncMock) as mock_nick:
                     with patch("afk.tasks.send_to_log", new_callable=AsyncMock):
                         await expire_afk_once(bot)

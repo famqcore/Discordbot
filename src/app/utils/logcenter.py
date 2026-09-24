@@ -254,7 +254,7 @@ async def _resolve_log_channel(guild):
     # Управляемый канал: ищем сохранённый ID, чиним права при дрейфе,
     # отсутствующий — создаём приватным.
     state_key = f"log_channel:{getattr(guild, 'id', 0)}"
-    stored = state_db.get_state(state_key)
+    stored = await state_db.async_get_state(state_key)
     if stored and stored.isdigit():
         channel = await _fetch_guild_channel(guild, int(stored))
         if channel is not None:
@@ -263,12 +263,12 @@ async def _resolve_log_channel(guild):
             if await _repair_managed_channel(guild, channel):
                 return channel
             return None
-        state_db.delete_state(state_key)
+        await state_db.async_delete_state(state_key)
 
     channel = await guild.create_text_channel(
         config.LOG_CHANNEL_NAME, overwrites=_private_overwrites(guild)
     )
-    state_db.set_state(state_key, str(channel.id))
+    await state_db.async_set_state(state_key, str(channel.id))
     logger.info(f"Создал приватный лог-канал «{config.LOG_CHANNEL_NAME}»")
     return channel
 
@@ -297,7 +297,7 @@ async def _resolve_thread(guild, key: str):
         return thread
 
     state_key = f"log_thread:{getattr(guild, 'id', 0)}:{key}"
-    stored = state_db.get_state(state_key)
+    stored = await state_db.async_get_state(state_key)
     if stored and stored.isdigit():
         thread = await _fetch_guild_channel(guild, int(stored))
         if thread is not None:
@@ -308,7 +308,7 @@ async def _resolve_thread(guild, key: str):
                 f"logcenter: управляемая ветка «{key}» не прошла проверку "
                 f"({'; '.join(problems)}), пересоздаю"
             )
-        state_db.delete_state(state_key)
+        await state_db.async_delete_state(state_key)
 
     # ID не сохранён (первый запуск после обновления или потеря bot_state):
     # ищем существующую ветку по имени, включая архивированные, чтобы не
@@ -317,7 +317,7 @@ async def _resolve_thread(guild, key: str):
     if existing is not None:
         problems = await _audit_thread(guild, channel, existing)
         if not problems:
-            state_db.set_state(state_key, str(existing.id))
+            await state_db.async_set_state(state_key, str(existing.id))
             logger.info(
                 f"logcenter outcome=reused_thread key={key} thread_id={existing.id} "
                 "(ветка найдена по имени, в том числе в архиве)"
@@ -333,7 +333,7 @@ async def _resolve_thread(guild, key: str):
         type=discord.ChannelType.public_thread,
         auto_archive_duration=MAX_AUTO_ARCHIVE,
     )
-    state_db.set_state(state_key, str(thread.id))
+    await state_db.async_set_state(state_key, str(thread.id))
     logger.info(f"Создал ветку логов «{name}» в канале «{config.LOG_CHANNEL_NAME}»")
     return thread
 

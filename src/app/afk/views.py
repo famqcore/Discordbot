@@ -14,14 +14,14 @@ from utils.ratelimit import retry_after
 from .duration import DurationError, format_minutes, parse_duration, parse_return_time
 from .models import (
     add_afk_nickname,
+    async_get_afk_user,
+    async_get_all_afk,
+    async_mark_nick_applied,
+    async_set_afk,
+    async_take_afk_session,
     format_duration,
-    get_afk_user,
-    get_all_afk,
-    mark_nick_applied,
     remove_afk_nickname,
     session_duration,
-    set_afk,
-    take_afk_session,
 )
 
 __all__ = [
@@ -33,8 +33,8 @@ __all__ = [
 ]
 
 
-def build_afk_embed(guild: discord.Guild) -> discord.Embed:
-    rows = get_all_afk(guild.id)
+async def build_afk_embed(guild: discord.Guild) -> discord.Embed:
+    rows = await async_get_all_afk(guild.id)
 
     embed = discord.Embed(title=config.AFK_MENU_TITLE, color=discord.Color.red())
     embed.add_field(name=config.AFK_MENU_TOTAL, value=f"{len(rows)} человек", inline=False)
@@ -81,7 +81,7 @@ class AfkReturnView(discord.ui.View):
             return
 
         async with InteractionErrorBoundary(interaction, "afk.return"):
-            session = take_afk_session(self.member.id, self.guild_id)
+            session = await async_take_afk_session(self.member.id, self.guild_id)
             if session is None:
                 await interaction.response.send_message(config.AFK_RETURN_ERROR, ephemeral=True)
                 return
@@ -159,10 +159,10 @@ class AfkSetModal(discord.ui.Modal, title=config.AFK_MODAL_TITLE):
 
             # исходный ник фиксируется только при старте новой сессии:
             # повторная установка AFK не должна запомнить ник с префиксом
-            existing = get_afk_user(self.member.id, self.guild_id)
+            existing = await async_get_afk_user(self.member.id, self.guild_id)
             original_nick = existing["original_nick"] if existing else self.member.nick
 
-            result = set_afk(
+            result = await async_set_afk(
                 self.member.id,
                 self.guild_id,
                 reason,
@@ -174,7 +174,7 @@ class AfkSetModal(discord.ui.Modal, title=config.AFK_MODAL_TITLE):
             if result.created:
                 nick_applied = await add_afk_nickname(self.member)
                 if nick_applied:
-                    mark_nick_applied(self.member.id, self.guild_id, True)
+                    await async_mark_nick_applied(self.member.id, self.guild_id, True)
 
             timestamp = clock.timestamp(parsed.return_at)
             prefix = "🔴 Вы в AFK." if result.created else "🔄 AFK обновлён."
@@ -256,7 +256,7 @@ class AfkMenuView(discord.ui.View):
             return
 
         async with InteractionErrorBoundary(interaction, "afk.return_prompt"):
-            row = get_afk_user(interaction.user.id, interaction.guild_id)
+            row = await async_get_afk_user(interaction.user.id, interaction.guild_id)
             if not row:
                 await interaction.response.send_message(config.AFK_NOT_AFK, ephemeral=True)
                 return
@@ -284,5 +284,5 @@ class AfkMenuView(discord.ui.View):
         if not await self._check_button_cooldown(interaction, "refresh"):
             return
         async with InteractionErrorBoundary(interaction, "afk.list"):
-            embed = build_afk_embed(interaction.guild)
+            embed = await build_afk_embed(interaction.guild)
             await interaction.response.send_message(embed=embed, ephemeral=True)

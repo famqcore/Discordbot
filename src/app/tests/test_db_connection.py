@@ -1,7 +1,10 @@
+import asyncio
 import importlib
 import os
 import sqlite3
 import tempfile
+import threading
+import time
 import unittest
 
 import config
@@ -54,6 +57,37 @@ class TestGetDb(unittest.TestCase):
         self.assertIsInstance(conn2, sqlite3.Connection)
         conn1.close()
         conn2.close()
+
+
+class TestAsyncDatabaseGateway(unittest.IsolatedAsyncioTestCase):
+    """Контракт шлюза: медленная SQLite-операция не останавливает bot loop."""
+
+    def setUp(self):
+        self.temp = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
+        self.temp.close()
+        self.gateway = db_module.Database(self.temp.name)
+
+    def tearDown(self):
+        self.gateway.close()
+        try:
+            os.unlink(self.temp.name)
+        except OSError:
+            pass
+
+    async def test_arun_yields_to_event_loop_while_database_is_busy(self):
+        operation_started = threading.Event()
+
+        def slow_operation(_connection):
+            operation_started.set()
+            time.sleep(0.1)
+
+        database_task = asyncio.create_task(self.gateway.arun(slow_operation))
+        await asyncio.to_thread(operation_started.wait)
+
+        loop_progressed = asyncio.Event()
+        asyncio.get_running_loop().call_soon(loop_progressed.set)
+        await asyncio.wait_for(loop_progressed.wait(), timeout=0.03)
+        await database_task
 
 
 if __name__ == "__main__":

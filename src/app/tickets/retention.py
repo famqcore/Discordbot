@@ -44,7 +44,7 @@ async def _purge_ticket(bot, ticket) -> bool:
             refs = tickets_db.parse_log_message_refs(ticket["log_message_ids"])
             if refs:
                 await delete_log_messages(guild, refs)
-        return tickets_db.delete_ticket_by_id(ticket["id"])
+        return await tickets_db.async_delete_ticket_by_id(ticket["id"])
     except (discord.Forbidden, discord.HTTPException, sqlite3.Error) as error:
         logger.exception(
             f"retention outcome=purge_failed ticket_id={ticket['id']} "
@@ -58,7 +58,7 @@ async def purge_expired_once(bot) -> int:
     cutoff = clock.to_db(clock.shift(clock.utcnow(), days=-config.TICKET_RETENTION_DAYS))
     purged_per_guild: dict[int, int] = {}
 
-    for ticket in tickets_db.get_retention_expired(cutoff):
+    for ticket in await tickets_db.async_get_retention_expired(cutoff):
         if await _purge_ticket(bot, ticket):
             purged_per_guild[ticket["guild_id"]] = purged_per_guild.get(ticket["guild_id"], 0) + 1
 
