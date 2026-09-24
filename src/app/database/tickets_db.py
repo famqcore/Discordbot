@@ -510,17 +510,19 @@ def anonymize_user_tickets(guild_id: int, user_id: int) -> int:
 def get_retention_expired(cutoff_iso: str) -> list[sqlite3.Row]:
     """Тикеты старше срока хранения.
 
-    Конечные — по дате закрытия, активные (заброшенные) — по дате создания.
+    Конечные — по дате закрытия, открытые заброшенные — по дате создания.
+    ``processing`` принадлежит текущему терминальному действию, поэтому его
+    возвращает в ``open`` reconciliation после истечения захвата.
     """
     return db.run(
         lambda conn: conn.execute(
             f"""
             SELECT * FROM tickets
             WHERE (status NOT IN ({_ACTIVE_SQL}) AND closed_at IS NOT NULL AND closed_at < ?)
-               OR (status IN ({_ACTIVE_SQL}) AND created_at < ?)
+               OR (status = ? AND created_at < ?)
             ORDER BY id
             """,
-            (*ACTIVE_STATUSES, cutoff_iso, *ACTIVE_STATUSES, cutoff_iso),
+            (*ACTIVE_STATUSES, cutoff_iso, STATUS_OPEN, cutoff_iso),
         ).fetchall()
     )
 

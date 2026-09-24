@@ -9,7 +9,7 @@ from discord.ext import commands
 import config
 from database import tickets_db
 from database.db import run
-from database.schema import STATUS_ACCEPTED
+from database.schema import STATUS_ACCEPTED, STATUS_CLOSED, STATUS_PROCESSING
 from tests.support import (
     FakeChannel,
     FakeGuild,
@@ -121,6 +121,16 @@ class PurgeExpiredTestCase(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(purged, 1)
         self.assertIsNone(tickets_db.get_ticket(100))
+
+    async def test_processing_ticket_is_not_purged_during_terminal_action(self):
+        self._save_open(100, created_days=config.TICKET_RETENTION_DAYS + 30)
+        self.assertTrue(tickets_db.begin_transition(100, STATUS_CLOSED, self.guild.id))
+
+        with patch("tickets.retention.send_to_log", new_callable=AsyncMock):
+            purged = await purge_expired_once(self.bot)
+
+        self.assertEqual(purged, 0)
+        self.assertEqual(tickets_db.get_ticket(100)["status"], STATUS_PROCESSING)
 
     async def test_fresh_open_ticket_kept(self):
         self._save_open(100, created_days=3)
