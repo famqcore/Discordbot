@@ -6,6 +6,8 @@ import tempfile
 import threading
 import time
 import unittest
+from concurrent.futures import TimeoutError as FuturesTimeoutError
+from unittest.mock import MagicMock, patch
 
 import config
 import database.db as db_module
@@ -57,6 +59,21 @@ class TestGetDb(unittest.TestCase):
         self.assertIsInstance(conn2, sqlite3.Connection)
         conn1.close()
         conn2.close()
+
+
+class TestDatabaseClose(unittest.TestCase):
+    def test_close_handles_worker_timeout_and_reports_it(self):
+        database = db_module.Database(":memory:")
+        database._executor.shutdown(wait=True)
+        executor = MagicMock()
+        executor.submit.return_value.result.side_effect = FuturesTimeoutError()
+        database._executor = executor
+
+        with patch.object(db_module, "logger") as mock_logger:
+            database.close()
+
+        mock_logger.warning.assert_called_once_with("database.close outcome=timeout timeout_seconds=10")
+        executor.shutdown.assert_called_once_with(wait=True)
 
 
 class TestAsyncDatabaseGateway(unittest.IsolatedAsyncioTestCase):

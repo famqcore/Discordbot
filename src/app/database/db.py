@@ -24,10 +24,11 @@ import sqlite3
 import threading
 import time
 from collections.abc import Callable
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
 from typing import TypeVar
 
 import config
+from utils.logger import logger
 
 T = TypeVar("T")
 
@@ -164,6 +165,8 @@ class Database:
         self._closed = True
         try:
             self._executor.submit(self._close_connection).result(timeout=10)
+        except FuturesTimeoutError:
+            logger.warning("database.close outcome=timeout timeout_seconds=10")
         except RuntimeError:
             # executor уже остановлен (интерпретатор завершается)
             pass
