@@ -483,6 +483,22 @@ class TranscriptTestCase(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(transcript.complete)
         self.assertIn("обрезана", transcript.status_note())
 
+    async def test_truncated_history_keeps_latest_messages_in_chronological_order(self):
+        channel = self._channel(
+            [
+                FakeMessage(message_id=1, content="oldest"),
+                FakeMessage(message_id=2, content="middle"),
+                FakeMessage(message_id=3, content="latest"),
+            ]
+        )
+
+        transcript = await build_transcript(channel, limit=2)
+        content = transcript.files[0].fp.read().decode("utf-8")
+
+        self.assertTrue(transcript.truncated)
+        self.assertNotIn("oldest", content)
+        self.assertLess(content.index("middle"), content.index("latest"))
+
     async def test_large_history_is_size_limited(self):
         # немного очень больших сообщений быстрее, чем тысячи мелких
         messages = [FakeMessage(message_id=i, content="x" * 200_000) for i in range(40)]

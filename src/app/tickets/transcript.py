@@ -151,15 +151,17 @@ async def build_transcript(channel: Any, limit: int = MAX_MESSAGES) -> Transcrip
     channel_id = getattr(channel, "id", 0)
     result = Transcript(channel_id=channel_id)
 
-    body: list[str] = []
+    messages: list[Any] = []
     count = 0
     try:
-        async for message in channel.history(limit=limit + 1, oldest_first=True):
+        # Discord отдаёт историю от новых сообщений к старым. Берём свежий
+        # хвост, а перед записью возвращаем хронологический порядок.
+        async for message in channel.history(limit=limit + 1, oldest_first=False):
             count += 1
             if count > limit:
                 result.truncated = True
                 break
-            body.extend(_format_message(message))
+            messages.append(message)
     except discord.Forbidden as error:
         result.failed = True
         result.error = "у бота нет прав на чтение истории канала"
@@ -181,6 +183,7 @@ async def build_transcript(channel: Any, limit: int = MAX_MESSAGES) -> Transcrip
     if result.message_count == 0:
         return result
 
+    body = [line for message in reversed(messages) for line in _format_message(message)]
     text = "\n".join(_header(channel, result.message_count, result.truncated) + body)
     data = text.encode("utf-8")
     if len(data) > MAX_FILE_BYTES:

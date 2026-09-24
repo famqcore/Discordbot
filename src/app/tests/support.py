@@ -221,7 +221,13 @@ class FakeChannel:
         self._messages = list(messages)
 
     def history(self, *args, **kwargs) -> AsyncIterator:
-        return AsyncIterator(self._messages)
+        messages = list(self._messages)
+        if not kwargs.get("oldest_first", False):
+            messages.reverse()
+        limit = kwargs.get("limit")
+        if isinstance(limit, int):
+            messages = messages[:limit]
+        return AsyncIterator(messages)
 
     def archived_threads(self, *args, **kwargs) -> AsyncIterator:
         return AsyncIterator(self._archived)
