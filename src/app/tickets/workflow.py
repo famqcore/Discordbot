@@ -105,9 +105,14 @@ async def complete_terminal_action(
 
     embed.add_field(name="Архив переписки", value=transcript.status_note(), inline=False)
 
+    permanent_log_error = False
     try:
         log_message = await send_to_log(
-            guild, LOG_KEY_DECISIONS, embed=embed, files=transcript.files or None
+            guild,
+            LOG_KEY_DECISIONS,
+            embed=embed,
+            files=transcript.files or None,
+            raise_http_errors=True,
         )
     except discord.HTTPException as error:
         if is_retryable(error):
@@ -125,10 +130,26 @@ async def complete_terminal_action(
                 ),
                 correlation_id=correlation_id,
             )
+        permanent_log_error = True
         log_message = None
         logger.exception(
             f"ticket.terminal outcome=log_failed status={status} channel_id={channel_id} "
             f"correlation_id={correlation_id}"
+        )
+
+    if log_message is None and not permanent_log_error:
+        await async_release_transition(channel_id)
+        logger.warning(
+            f"ticket.terminal outcome=log_unavailable status={status} "
+            f"channel_id={channel_id} correlation_id={correlation_id}"
+        )
+        return TerminalOutcome(
+            ok=False,
+            reason=(
+                "Не удалось сохранить аудит решения, заявка осталась открытой — "
+                f"проверьте лог-центр и повторите действие. Код: `{correlation_id}`"
+            ),
+            correlation_id=correlation_id,
         )
 
     if log_message is not None:

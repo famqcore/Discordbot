@@ -18,10 +18,11 @@
 ветка разархивируется, поэтому история одной категории не распадается
 на дубли после автоархивации.
 
-Гарантия устойчивости: send_to_log никогда не бросает исключений наружу
-(логирование не должно ронять основную логику бота), но вернёт None,
-если отправка отклонена проверками. Каждая потеря аудита увеличивает
-счётчик ``delivery_stats()`` — длительная деградация видна оператору.
+По умолчанию send_to_log не бросает исключений наружу (логирование не
+должно ронять основную логику), но критичный вызывающий код может запросить
+``raise_http_errors`` и сам решить, нужно ли откатить операцию. Каждая
+потеря аудита увеличивает счётчик ``delivery_stats()`` — длительная
+деградация видна оператору.
 """
 
 from __future__ import annotations
@@ -373,13 +374,21 @@ async def validate_log_center_config(guild) -> list[str]:
 
 
 async def send_to_log(
-    guild, key: str, content: str | None = None, embed=None, files=None
+    guild,
+    key: str,
+    content: str | None = None,
+    embed=None,
+    files=None,
+    *,
+    raise_http_errors: bool = False,
 ) -> discord.Message | None:
     """Отправляет сообщение в проверенную ветку лог-центра.
 
     Возвращает отправленное сообщение (нужно удалению данных, чтобы потом
     стереть транскрипты) или None, если точка отправки не прошла проверку
-    приватности/конфигурации. Исключения наружу не выбрасываются.
+    приватности/конфигурации. ``raise_http_errors`` нужен транзакциям, для
+    которых отсутствие аудита требует отката; счётчики доставки обновляются
+    в обоих режимах.
     """
     if guild is None:
         return None
@@ -388,6 +397,8 @@ async def send_to_log(
         destination = await _resolve_thread(guild, key)
     except (discord.Forbidden, discord.HTTPException) as error:
         _record_delivery("failed", key, f"resolve_{type(error).__name__}")
+        if raise_http_errors:
+            raise
         return None
     except Exception as error:  # noqa: BLE001 - логирование не должно ронять бота
         logger.exception(f"logcenter outcome=resolve_error key={key}")
@@ -408,9 +419,13 @@ async def send_to_log(
         )
     except discord.Forbidden:
         _record_delivery("failed", key, "нет прав на отправку в ветку лог-центра")
+        if raise_http_errors:
+            raise
         return None
     except discord.HTTPException as error:
         _record_delivery("failed", key, f"http_{getattr(error, 'status', '?')}")
+        if raise_http_errors:
+            raise
         return None
     except Exception as error:  # noqa: BLE001 - логирование не должно ронять бота
         logger.exception(f"logcenter outcome=send_error key={key}")

@@ -224,6 +224,16 @@ class CloseButtonTestCase(TerminalActionTestCase):
         self.assertEqual(self.ticket()["status"], STATUS_CLOSED)
         self.channel.delete.assert_awaited_once()
 
+    async def test_missing_audit_message_releases_ticket_for_retry(self):
+        interaction = self.interaction()
+
+        with patch("tickets.workflow.send_to_log", new_callable=AsyncMock, return_value=None):
+            await CloseButton().callback(interaction)
+
+        self.assertEqual(self.ticket()["status"], STATUS_OPEN)
+        self.channel.delete.assert_not_awaited()
+        self.applicant.send.assert_not_awaited()
+
     async def test_channel_delete_failure_keeps_status_closed(self):
         """Канал не удалился — статус уже терминальный, уборку доделает reconcile."""
         self.channel.delete = AsyncMock(side_effect=make_forbidden())

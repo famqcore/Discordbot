@@ -33,7 +33,7 @@ T = TypeVar("T")
 USER_ERROR_TEXT = "⚠️ Не удалось выполнить действие. Попробуйте ещё раз позже."
 USER_ERROR_WITH_ID = "⚠️ Не удалось выполнить действие. Код ошибки для администратора: `{id}`"
 
-RETRYABLE_STATUS = (500, 502, 503, 504)
+RETRYABLE_STATUS = (429, 500, 502, 503, 504)
 MAX_RETRIES = 3
 RETRY_BASE_DELAY = 0.5
 
@@ -63,7 +63,7 @@ def log_failure(event: str, error: BaseException, correlation_id: str, **fields:
 
 
 def is_retryable(error: BaseException) -> bool:
-    """Временная ли это ошибка: 5xx/таймаут Discord или занятая БД."""
+    """Временная ли это ошибка: rate limit/5xx/таймаут Discord или занятая БД."""
     if isinstance(error, discord.HTTPException):
         return getattr(error, "status", None) in RETRYABLE_STATUS
     if isinstance(error, sqlite3.OperationalError):

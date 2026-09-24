@@ -113,6 +113,20 @@ class TestSendToLog(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(kwargs["allowed_mentions"].everyone)
         self.assertEqual(kwargs["allowed_mentions"].roles, [])
 
+    async def test_critical_delivery_propagates_discord_error(self):
+        guild = make_guild()
+        channel = make_channel(guild)
+        thread = make_thread(guild, channel)
+        thread.send = AsyncMock(side_effect=http_exception(503))
+        guild.get_channel = MagicMock(side_effect=lambda cid: channel if cid == 100 else None)
+        guild.get_thread = MagicMock(side_effect=lambda cid: thread if cid == 200 else None)
+
+        with patch.object(
+            logcenter, "config", make_config(LOG_CHANNEL_ID=100, LOG_THREAD_IDS={"afk": 200})
+        ):
+            with self.assertRaises(discord.HTTPException):
+                await send_to_log(guild, "afk", content="test", raise_http_errors=True)
+
     async def test_public_channel_refused(self):
         guild = make_guild()
         channel = make_channel(guild, viewable_by_everyone=True)
