@@ -117,6 +117,7 @@ TOKEN=dummy PYTHONWARNINGS=error python -m unittest discover -s tests -t . -v
 | Пишет, что роль не найдена | ID роли не задан, а поиска по имени нет | Вписать нужный `ROLE_*_ID` в `.env` |
 | Падает из-за TOKEN | Токен не задан или неверный | Проверить `.env` |
 | Отказывается писать в лог-канал | Канал из `LOG_CHANNEL_ID` не приватный | Закрыть канал для `@everyone`, оставить доступ боту и стафф-ролям |
+| `GUILD_TIMEZONE: пояс «Europe/Moscow» не найден` | В системе нет базы часовых поясов IANA, типично для Windows | `pip install tzdata` и перезапустить. В свежих зависимостях пакет уже есть, помогает `pip install -r requirements.txt` заново |
 | Кнопки не реагируют после рестарта | Запущена старая версия или поменяли `custom_id` | Обновить код и посмотреть лог `setup_hook` |
 
 Запуск через Docker описан в [deployment.md](deployment.md).

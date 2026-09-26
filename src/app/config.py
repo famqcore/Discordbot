@@ -142,7 +142,11 @@ def _timezone_env(name: str, default: str) -> str:
     if value is None:
         return default
     if not is_valid_timezone(value):
-        _error(f"{name}: «{value}» не является именем часового пояса IANA (пример: Europe/Moscow)")
+        _error(
+            f"{name}: пояс «{value}» не найден. Проверьте имя IANA (пример: Europe/Moscow); "
+            "если имя верное, значит в системе нет базы часовых поясов, поставьте её: "
+            "pip install tzdata"
+        )
         return default
     return value
 

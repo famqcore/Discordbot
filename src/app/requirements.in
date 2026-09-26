@@ -1,3 +1,7 @@
 # Direct runtime dependencies. Regenerate requirements.txt after reviewed updates.
 discord.py>=2.7,<2.8
 python-dotenv>=1.2,<2.0
+# База часовых поясов IANA. На Windows её в системе нет, и zoneinfo
+# не находит даже корректные имена вроде Europe/Moscow; в slim-образах
+# Linux она тоже может отсутствовать.
+tzdata>=2025.2
