@@ -21,6 +21,15 @@ def make_config(**overrides):
         "LOG_CHANNEL_NAME": "📋-логи",
         "LOG_THREAD_IDS": {"afk": None, "decisions": None},
         "LOG_THREAD_NAMES": {"afk": "🔴-afk", "decisions": "⚖️-решения"},
+        "LOG_SECTION_NAMES": {"afk": "🔴-afk", "decisions": "⚖️-решения", "errors": "🚨-ошибки"},
+        "LOG_CATEGORY_NAME": "logs bot",
+        "LOG_ERROR_PING_ENABLED": True,
+        "LOG_ERROR_PING_GUILD_OWNER": True,
+        "LOG_ERROR_PING_TEXT": "{mentions} ошибка бота, нужна проверка",
+        "LOG_ERRORS_GUIDE": "Как сообщать об ошибках бота",
+        "LOG_KEY_ERRORS": "errors",
+        "ROLE_OWNER_ID": 11,
+        "ROLE_DEP_OWNER_ID": 12,
         "LOG_THREAD_ENV_NAMES": {
             "afk": "LOG_THREAD_AFK_ID",
             "decisions": "LOG_THREAD_DECISIONS_ID",
@@ -35,6 +44,7 @@ def make_guild(guild_id=1):
     guild = MagicMock()
     guild.id = guild_id
     guild.name = "Тестовый сервер"
+    guild.owner_id = 777
     guild.me = MagicMock()
     guild.me.id = 999
     guild.me.roles = []
@@ -271,94 +281,213 @@ class TestSendToLog(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(result)
 
 
+def make_category(guild, category_id=50, *, viewable_by_everyone=False, channels=()):
+    category = MagicMock(spec=discord.CategoryChannel)
+    category.id = category_id
+    category.guild = guild
+    category.name = "logs bot"
+    category.channels = list(channels)
+    category.edit = AsyncMock()
+    category.permissions_for = MagicMock(
+        return_value=SimpleNamespace(view_channel=viewable_by_everyone)
+    )
+    return category
+
+
 class TestManagedLogCenter(unittest.IsolatedAsyncioTestCase):
-    """Лог-центр, созданный ботом: приватный, ID запоминаются, дрейф прав чинится."""
+    """Управляемый лог-центр: категория «logs bot» и отдельный канал на раздел."""
 
-    async def test_creates_private_channel_and_thread_and_remembers_ids(self):
+    def _state(self, values=None):
+        stored = dict(values or {})
+        state = MagicMock()
+        state.calls = stored
+        state.async_get_state = AsyncMock(side_effect=lambda key: stored.get(key))
+        state.async_set_state = AsyncMock(
+            side_effect=lambda key, value: stored.__setitem__(key, value)
+        )
+        state.async_delete_state = AsyncMock(side_effect=lambda key: stored.pop(key, None))
+        return state
+
+    async def test_creates_category_and_channel_and_remembers_ids(self):
         guild = make_guild()
+        category = make_category(guild)
         channel = make_channel(guild)
-        thread = make_thread(guild, channel)
-        channel.create_thread = AsyncMock(return_value=thread)
+        guild.create_category = AsyncMock(return_value=category)
         guild.create_text_channel = AsyncMock(return_value=channel)
-
-        mock_state = MagicMock()
-        mock_state.async_set_state = AsyncMock()
-        mock_state.async_delete_state = AsyncMock()
-        mock_state.async_get_state = AsyncMock(return_value=None)
+        state = self._state()
 
         with patch.object(logcenter, "config", make_config()):
-            with patch.object(logcenter, "state_db", mock_state):
+            with patch.object(logcenter, "state_db", state):
                 result = await send_to_log(guild, "afk", content="test")
 
         self.assertIsNotNone(result)
+        guild.create_category.assert_awaited_once()
         guild.create_text_channel.assert_awaited_once()
-        channel.create_thread.assert_awaited_once()
-        stored_keys = [call.args[0] for call in mock_state.async_set_state.call_args_list]
-        self.assertIn(f"log_channel:{guild.id}", stored_keys)
-        self.assertIn(f"log_thread:{guild.id}:afk", stored_keys)
+        # канал создаётся внутри категории и закрыт для @everyone
+        kwargs = guild.create_text_channel.call_args.kwargs
+        self.assertIs(kwargs["category"], category)
+        self.assertIn("overwrites", kwargs)
+        self.assertEqual(state.calls[f"log_category:{guild.id}"], str(category.id))
+        self.assertEqual(state.calls[f"log_channel:{guild.id}:afk"], str(channel.id))
+        channel.send.assert_awaited_once()
+
+    async def test_separate_channel_per_section(self):
+        guild = make_guild()
+        category = make_category(guild)
+        afk_channel = make_channel(guild, channel_id=101)
+        decisions_channel = make_channel(guild, channel_id=102)
+        guild.create_category = AsyncMock(return_value=category)
+        guild.create_text_channel = AsyncMock(side_effect=[afk_channel, decisions_channel])
+        state = self._state()
+        known = {50: category, 101: afk_channel, 102: decisions_channel}
+        guild.get_channel = MagicMock(side_effect=known.get)
+
+        with patch.object(logcenter, "config", make_config()):
+            with patch.object(logcenter, "state_db", state):
+                await send_to_log(guild, "afk", content="раз")
+                await send_to_log(guild, "decisions", content="два")
+
+        self.assertEqual(guild.create_category.await_count, 1)
+        self.assertEqual(guild.create_text_channel.await_count, 2)
+        self.assertEqual(state.calls[f"log_channel:{guild.id}:afk"], "101")
+        self.assertEqual(state.calls[f"log_channel:{guild.id}:decisions"], "102")
 
     async def test_reuses_channel_from_state(self):
         guild = make_guild()
         channel = make_channel(guild)
-        thread = make_thread(guild, channel)
         guild.get_channel = MagicMock(side_effect=lambda cid: {100: channel}.get(cid))
-        guild.get_thread = MagicMock(side_effect=lambda cid: {200: thread}.get(cid))
         guild.create_text_channel = AsyncMock()
-
-        mock_state = MagicMock()
-        mock_state.async_set_state = AsyncMock()
-        mock_state.async_delete_state = AsyncMock()
-        mock_state.async_get_state = AsyncMock(
-            side_effect=lambda key: "100" if key == f"log_channel:{guild.id}" else "200"
-        )
+        guild.create_category = AsyncMock()
+        state = self._state({f"log_channel:{guild.id}:afk": "100"})
 
         with patch.object(logcenter, "config", make_config()):
-            with patch.object(logcenter, "state_db", mock_state):
+            with patch.object(logcenter, "state_db", state):
                 result = await send_to_log(guild, "afk", content="test")
 
         self.assertIsNotNone(result)
         guild.create_text_channel.assert_not_called()
+        guild.create_category.assert_not_called()
+
+    async def test_existing_channel_in_category_reused_by_name(self):
+        """Потеря bot_state не плодит дубли: канал ищется по имени в категории."""
+        guild = make_guild()
+        existing = make_channel(guild, channel_id=111)
+        existing.name = "🔴-afk"
+        category = make_category(guild, channels=[existing])
+        guild.get_channel = MagicMock(side_effect=lambda cid: {50: category}.get(cid))
+        guild.create_text_channel = AsyncMock()
+        state = self._state({f"log_category:{guild.id}": "50"})
+
+        with patch.object(logcenter, "config", make_config()):
+            with patch.object(logcenter, "state_db", state):
+                result = await send_to_log(guild, "afk", content="test")
+
+        self.assertIsNotNone(result)
+        guild.create_text_channel.assert_not_called()
+        self.assertEqual(state.calls[f"log_channel:{guild.id}:afk"], "111")
 
     async def test_repairs_overwrites_of_managed_channel(self):
         guild = make_guild()
-        # канал наш, но кто-то открыл его публично — права приводим к приватным
+        # канал наш, но кто-то открыл его публично: права приводим к приватным
         channel = make_channel(guild, viewable_by_everyone=True)
-        thread = make_thread(guild, channel)
-        channel.create_thread = AsyncMock(return_value=thread)
         guild.get_channel = MagicMock(side_effect=lambda cid: {100: channel}.get(cid))
-
-        mock_state = MagicMock()
-        mock_state.async_set_state = AsyncMock()
-        mock_state.async_delete_state = AsyncMock()
-        mock_state.async_get_state = AsyncMock(
-            side_effect=lambda key: "100" if key == f"log_channel:{guild.id}" else None
-        )
+        state = self._state({f"log_channel:{guild.id}:afk": "100"})
 
         with patch.object(logcenter, "config", make_config()):
-            with patch.object(logcenter, "state_db", mock_state):
+            with patch.object(logcenter, "state_db", state):
                 result = await send_to_log(guild, "afk", content="test")
 
         self.assertIsNotNone(result)
         channel.edit.assert_awaited_once()
 
-    async def test_stale_state_channel_recreates(self):
+    async def test_repairs_public_category(self):
         guild = make_guild()
-        new_channel = make_channel(guild)
-        thread = make_thread(guild, new_channel)
-        new_channel.create_thread = AsyncMock(return_value=thread)
-        guild.create_text_channel = AsyncMock(return_value=new_channel)
-
-        mock_state = MagicMock()
-        mock_state.async_set_state = AsyncMock()
-        mock_state.async_delete_state = AsyncMock()
-        mock_state.async_get_state = AsyncMock(return_value="100")  # ID, которого уже нет
+        category = make_category(guild, viewable_by_everyone=True)
+        channel = make_channel(guild)
+        guild.get_channel = MagicMock(side_effect=lambda cid: {50: category}.get(cid))
+        guild.create_text_channel = AsyncMock(return_value=channel)
+        state = self._state({f"log_category:{guild.id}": "50"})
 
         with patch.object(logcenter, "config", make_config()):
-            with patch.object(logcenter, "state_db", mock_state):
+            with patch.object(logcenter, "state_db", state):
+                result = await send_to_log(guild, "afk", content="test")
+
+        self.assertIsNotNone(result)
+        category.edit.assert_awaited_once()
+
+    async def test_stale_state_channel_recreates(self):
+        guild = make_guild()
+        category = make_category(guild)
+        new_channel = make_channel(guild)
+        guild.create_category = AsyncMock(return_value=category)
+        guild.create_text_channel = AsyncMock(return_value=new_channel)
+        # ID, которых уже нет на сервере
+        state = self._state(
+            {f"log_channel:{guild.id}:afk": "100", f"log_category:{guild.id}": "50"}
+        )
+
+        with patch.object(logcenter, "config", make_config()):
+            with patch.object(logcenter, "state_db", state):
                 result = await send_to_log(guild, "afk", content="test")
 
         self.assertIsNotNone(result)
         guild.create_text_channel.assert_awaited_once()
+
+    async def test_errors_channel_gets_bug_report_guide(self):
+        guild = make_guild()
+        category = make_category(guild)
+        channel = make_channel(guild)
+        guide_message = MagicMock(spec=discord.Message)
+        guide_message.pin = AsyncMock()
+        channel.send = AsyncMock(return_value=guide_message)
+        guild.create_category = AsyncMock(return_value=category)
+        guild.create_text_channel = AsyncMock(return_value=channel)
+
+        with patch.object(logcenter, "config", make_config()):
+            with patch.object(logcenter, "state_db", self._state()):
+                await send_to_log(guild, "errors", content="упало")
+
+        texts = [
+            call.args[0] if call.args else call.kwargs.get("content")
+            for call in channel.send.call_args_list
+        ]
+        self.assertIn("Как сообщать об ошибках бота", texts[0])
+        guide_message.pin.assert_awaited_once()
+
+    async def test_error_message_pings_owners(self):
+        guild = make_guild()
+        category = make_category(guild)
+        channel = make_channel(guild)
+        guild.create_category = AsyncMock(return_value=category)
+        guild.create_text_channel = AsyncMock(return_value=channel)
+
+        with patch.object(logcenter, "config", make_config()):
+            with patch.object(logcenter, "state_db", self._state()):
+                await send_to_log(guild, "errors", content="упало")
+
+        last = channel.send.call_args
+        content = last.kwargs["content"]
+        self.assertIn("<@&11>", content)
+        self.assertIn("<@&12>", content)
+        self.assertIn("<@777>", content)
+        allowed = last.kwargs["allowed_mentions"]
+        self.assertEqual([role.id for role in allowed.roles], [11, 12])
+        self.assertEqual([user.id for user in allowed.users], [777])
+
+    async def test_ping_disabled_keeps_content_clean(self):
+        guild = make_guild()
+        category = make_category(guild)
+        channel = make_channel(guild)
+        guild.create_category = AsyncMock(return_value=category)
+        guild.create_text_channel = AsyncMock(return_value=channel)
+
+        with patch.object(logcenter, "config", make_config(LOG_ERROR_PING_ENABLED=False)):
+            with patch.object(logcenter, "state_db", self._state()):
+                await send_to_log(guild, "errors", content="упало")
+
+        content = channel.send.call_args.kwargs["content"]
+        self.assertEqual(content, "упало")
+        self.assertEqual(channel.send.call_args.kwargs["allowed_mentions"].roles, [])
 
 
 class TestConcurrentThreadResolution(unittest.IsolatedAsyncioTestCase):
@@ -422,7 +551,7 @@ class TestArchivedThreadReuse(unittest.IsolatedAsyncioTestCase):
         guild.get_channel = MagicMock(side_effect=lambda cid: {100: channel}.get(cid))
         state = self._managed_state(guild)
 
-        with patch.object(logcenter, "config", make_config()):
+        with patch.object(logcenter, "config", make_config(LOG_CHANNEL_ID=100)):
             with patch.object(logcenter, "state_db", state):
                 result = await send_to_log(guild, "afk", content="test")
 
@@ -439,7 +568,7 @@ class TestArchivedThreadReuse(unittest.IsolatedAsyncioTestCase):
         channel.threads = [active]
         guild.get_channel = MagicMock(side_effect=lambda cid: {100: channel}.get(cid))
 
-        with patch.object(logcenter, "config", make_config()):
+        with patch.object(logcenter, "config", make_config(LOG_CHANNEL_ID=100)):
             with patch.object(logcenter, "state_db", self._managed_state(guild)):
                 result = await send_to_log(guild, "afk", content="test")
 
@@ -457,7 +586,7 @@ class TestArchivedThreadReuse(unittest.IsolatedAsyncioTestCase):
         channel.create_thread = AsyncMock(return_value=created)
         guild.get_channel = MagicMock(side_effect=lambda cid: {100: channel}.get(cid))
 
-        with patch.object(logcenter, "config", make_config()):
+        with patch.object(logcenter, "config", make_config(LOG_CHANNEL_ID=100)):
             with patch.object(logcenter, "state_db", self._managed_state(guild)):
                 result = await send_to_log(guild, "afk", content="test")
 
@@ -473,7 +602,7 @@ class TestArchivedThreadReuse(unittest.IsolatedAsyncioTestCase):
         channel.create_thread = AsyncMock(return_value=created)
         guild.get_channel = MagicMock(side_effect=lambda cid: {100: channel}.get(cid))
 
-        with patch.object(logcenter, "config", make_config()):
+        with patch.object(logcenter, "config", make_config(LOG_CHANNEL_ID=100)):
             with patch.object(logcenter, "state_db", self._managed_state(guild)):
                 result = await send_to_log(guild, "afk", content="test")
 

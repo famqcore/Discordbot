@@ -1,74 +1,83 @@
 <div align="center">
   <h1>FAMQCORE Bot</h1>
-  <p><strong>Discord-бот для автоматизации процессов.И для упрощенния работы владельцев семей на Majestic Rp или GTA 5 Rp</strong></p>
-  
+  <p><strong>Discord-бот для приёма заявок в семью и учёта AFK. Сделан для владельцев семей на Majestic RP и GTA 5 RP.</strong></p>
+
   <img src="docs/assets/logo.png" alt="FAMQCORE" width="720">
-  
-  [![CI](https://github.com/famqcore/Discordbot/actions/workflows/tests.yml/badge.svg)](https://github.com/famqcore/Discordbot/actions/workflows/tests.yml)
-  [![Python 3.10+](https://img.shields.io/badge/Python-3.10%2B-3776AB?logo=python&logoColor=white)](https://www.python.org/)
-  [![discord.py](https://img.shields.io/badge/discord.py-2.x-5865F2?logo=discord&logoColor=white)](https://discordpy.readthedocs.io/)
+
+  [![CI](https://github.com/famqcore/famqcore_discord/actions/workflows/tests.yml/badge.svg)](https://github.com/famqcore/famqcore_discord/actions/workflows/tests.yml)
+  [![Python 3.11](https://img.shields.io/badge/Python-3.11-3776AB?logo=python&logoColor=white)](https://www.python.org/)
+  [![discord.py](https://img.shields.io/badge/discord.py-2.7-5865F2?logo=discord&logoColor=white)](https://discordpy.readthedocs.io/)
   [![License: MIT](https://img.shields.io/badge/License-MIT-43a047.svg)](LICENSE)
 </div>
 
-**FAMQCORE Bot** автоматизирует путь участника от первой заявки до работы в сообществе: приватные тикеты, решения рекрутёров, централизованные логи, AFK-учёт и статистика. Бот изолирует данные между Discord-серверами и настраивается по ID ролей и каналов — переименование объектов не ломает работу.
+Бот закрывает весь путь новичка: человек жмёт кнопку, заполняет анкету, получает приватный тикет, рекрутёр принимает или отказывает, всё решение уходит в приватный лог-канал. Плюс отдельная AFK-система: статус с причиной, автоответ на упоминания и статистика отсутствий.
 
-> Проект находится в активной разработке. Используйте [Issues](https://github.com/famqcore/Discordbot/issues), чтобы сообщить о проблеме или предложить улучшение.
+Данные разных Discord-серверов не смешиваются, а все роли и каналы настраиваются по ID, так что переименование канала или роли ничего не ломает.
 
-## Возможности
+> Проект в активной разработке. Нашли баг или хотите фичу - напишите в [Issues](https://github.com/famqcore/famqcore_discord/issues).
 
-| Возможность | Что получает сообщество |
+## Что умеет
+
+| Возможность | Что это даёт |
 |---|---|
-| 🎫 **Заявки и тикеты** | Две формы заявок, приватные каналы, история решений и защита от дубликатов. |
-| 🛡️ **Рекрутинг** | Роли, действия «принять / отклонить», причины решений и вызов на обзвон. |
-| 💤 **AFK-система** | Причина и время возврата, автоответ на упоминания, префикс ника и статистика. |
-| 📊 **Статистика** | Сводка по заявкам, история тикетов и показатели AFK. |
-| 🔒 **Изоляция данных** | Заявки и AFK-данные разделены по `guild_id`; пользовательские данные можно анонимизировать. |
-| 🧰 **Эксплуатация** | Docker, SQLite-миграции, логи с ротацией, тесты, Ruff и GitHub Actions. |
+| Заявки и тикеты | Две формы (RP и CAPT), приватный канал под каждую заявку, защита от второй заявки от одного человека |
+| Рекрутинг | Кнопки «Принять», «Отказать», «Вызвать на обзвон», «Закрыть тикет» с обязательной причиной решения |
+| Лог-центр | Один приватный канал с ветками: заявки, решения, AFK, обзвоны, статистика, ошибки, аудит |
+| AFK | Причина, время возврата, префикс `[AFK]` в нике, автоответ на упоминание, личная статистика |
+| Статистика | Сводка по заявкам за всё время и по дням, история последних тикетов |
+| Приватность | Разделение по `guild_id`, удаление данных участника одной командой, автоочистка старых заявок |
+| Эксплуатация | Docker без root, миграции SQLite, ротация логов, 650+ тестов, Ruff и GitHub Actions |
 
 ## Быстрый старт
 
 ```bash
-git clone https://github.com/famqcore/Discordbot.git
-cd Discordbot/src/app
+git clone https://github.com/famqcore/famqcore_discord.git
+cd famqcore_discord/src/app
 python -m pip install --require-hashes -r requirements.txt
 cp .env.example .env
-# Откройте .env и добавьте токен Discord-бота
+# впишите в .env токен бота
 python main.py
 ```
 
-Перед запуском включите **Message Content Intent** и **Server Members Intent** в Discord Developer Portal. Полный пошаговый сценарий — в [руководстве по установке](docs/setup.md).
+До запуска включите в Discord Developer Portal два интента: **Message Content Intent** и **Server Members Intent**. Без них команды с префиксом `!` работать не будут. Полная пошаговая инструкция лежит в [docs/setup.md](docs/setup.md).
 
-## Главные команды
+## Основные команды
 
-| Команда | Назначение | Доступ |
+| Команда | Что делает | Кто может |
 |---|---|---|
-| `!famqcore` | Открыть панель подачи заявки | участники сервера |
-| `!afk` | Установить AFK-статус | участники сервера |
-| `!afk_list` | Показать список AFK | участники сервера |
-| `!stats` | Показать статистику заявок | администраторы |
-| `!history` | Показать историю тикетов | администраторы |
+| `!famqcore` | Открывает панель подачи заявки | все |
+| `!afk` | Меню своего AFK-статуса | все |
+| `!afk_list` | Кто сейчас в AFK | все |
+| `!afk_check @user` | Статус конкретного человека | все |
+| `!afk_stats @user` | Статистика AFK человека | все |
+| `!afk_remove @user` | Снять AFK принудительно | модераторы |
+| `!stats` | Статистика заявок | админы Discord |
+| `!history [N]` | Последние N заявок (1-25, по умолчанию 10) | админы Discord |
+| `!delete_user_data @user` | Удалить данные участника | админы Discord |
 
-Остальные команды, кнопки и права описаны в [документации](docs/commands.md).
+Подробности по кнопкам и правам - в [docs/commands.md](docs/commands.md).
 
 ## Документация
 
 | Раздел | О чём |
 |---|---|
-| [Обзор](docs/overview.md) | Назначение, возможности и технологии |
-| [Установка и запуск](docs/setup.md) | Настройка приложения Discord и первый запуск |
-| [Конфигурация](docs/configuration.md) | Переменные окружения, роли, каналы и тексты |
-| [Команды и кнопки](docs/commands.md) | Сценарии для участников и модераторов |
-| [AFK-система](docs/afk.md) | Статусы, автоответы и статистика |
-| [Архитектура](docs/architecture.md) | Модули, потоки данных и схема БД |
-| [Деплой](docs/deployment.md) | Docker, логи, бэкапы и обновления |
-| [Приватность](docs/privacy.md) | Хранимые данные и анонимизация |
-| [Разработка](docs/contributing.md) | Тесты, стиль кода и Pull Request |
-| [Дорожная карта](docs/roadmap.md) | Приоритеты развития |
+| [Обзор](docs/overview.md) | Зачем бот нужен и из чего состоит |
+| [Установка и запуск](docs/setup.md) | Приложение в Discord, токен, права, первый старт |
+| [Конфигурация](docs/configuration.md) | Переменные `.env`, настройки и тексты в `config.py` |
+| [Команды и кнопки](docs/commands.md) | Сценарии участника и модератора |
+| [AFK-система](docs/afk.md) | Статусы, форматы времени, автоответы, статистика |
+| [Архитектура](docs/architecture.md) | Модули, потоки данных, схема БД |
+| [Деплой](docs/deployment.md) | Docker, обновления, бэкапы, диагностика |
+| [Приватность](docs/privacy.md) | Что хранится, как удаляется, сроки хранения |
+| [Тесты и линтер](docs/testing.md) | Как прогнать проверки локально |
+| [Разработка](docs/contributing.md) | Процесс работы над задачей и PR |
+| [Скрипты обслуживания](docs/scripts.md) | Бэкап базы, очистка кеша, обновление из GitHub |
+| [Дорожная карта](docs/roadmap.md) | Что планируем дальше |
 
-## Участие
+## Как помочь
 
-Нашли ошибку, хотите предложить функцию или улучшить документацию? Откройте [Issue](https://github.com/famqcore/Discordbot/issues) или создайте Pull Request. Перед PR прочитайте [CONTRIBUTING.md](CONTRIBUTING.md) и выполните локальные проверки.
+Откройте [Issue](https://github.com/famqcore/famqcore_discord/issues) с багом или идеей либо присылайте Pull Request. Перед PR загляните в [CONTRIBUTING.md](CONTRIBUTING.md) и прогоните локальные проверки.
 
 ## Лицензия
 
-Код распространяется по лицензии [MIT](LICENSE).
+[MIT](LICENSE).

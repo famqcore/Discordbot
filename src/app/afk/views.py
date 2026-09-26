@@ -19,6 +19,7 @@ from .models import (
     async_set_afk,
     async_take_afk_session,
     format_duration,
+    has_afk_prefix,
     remove_afk_nickname,
     session_duration,
     strip_afk_prefix,
@@ -201,10 +202,15 @@ class AfkSetModal(discord.ui.Modal, title=config.AFK_MODAL_TITLE):
             )
             timestamp = clock.timestamp(parsed.return_at)
             prefix = "🔴 Вы в AFK." if result.created else "🔄 AFK обновлён."
+            # Ник мог остаться без префикса: Discord не даёт боту менять ник
+            # владельцу сервера и участникам с ролью выше своей.
+            nick_note = ""
+            if existing is None and not nick_applied and not has_afk_prefix(self.member.nick):
+                nick_note = f"\n{config.AFK_NICK_NOT_APPLIED_NOTE}"
             await interaction.response.send_message(
                 f"{prefix}\nПричина: {escape_user_text(reason)}\n"
                 f"Продолжительность: {format_minutes(parsed.minutes)}\n"
-                f"Вернётесь: <t:{timestamp}:R>",
+                f"Вернётесь: <t:{timestamp}:R>{nick_note}",
                 ephemeral=True,
                 allowed_mentions=mentions_for(),
             )

@@ -283,7 +283,19 @@ async def _post_create_steps(ticket: CreatedTicket) -> None:
 
 async def _grant_applied_role(ticket: CreatedTicket) -> None:
     role = get_role(ticket.guild, config.ROLE_APPLIED_ID, config.ROLE_APPLIED)
-    if role is None or not role < ticket.guild.me.top_role:
+    if role is None:
+        logger.warning(
+            f"ticket.create outcome=role_skipped reason=not_configured guild_id={ticket.guild.id}"
+        )
+        return
+    if not role < ticket.guild.me.top_role:
+        # молчать здесь нельзя: оператор увидит «заявка создана» и решит,
+        # что роль выдана, хотя иерархия ролей этого не позволила
+        logger.warning(
+            f"ticket.create outcome=role_skipped reason=role_above_bot "
+            f"guild_id={ticket.guild.id} role_id={role.id} "
+            "(поднимите роль бота выше выдаваемой роли)"
+        )
         return
     try:
         await ticket.applicant.add_roles(role, reason="Подана заявка")
