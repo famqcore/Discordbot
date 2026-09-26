@@ -1,16 +1,24 @@
-"""Лог-центр: один приватный канал, внутри — ветки по категориям логов.
+"""Лог-центр: приватные каналы логов, по одному на функцию бота.
 
 Принцип fail closed: транскрипты и метаданные заявок отправляются только
 в точку, прошедшую проверку приватности.
 
-- Настроенный LOG_CHANNEL_ID / LOG_THREAD_*_ID (внешний объект) проверяется
-  на тип, принадлежность серверу и приватность: @everyone без просмотра,
-  доступ только у стафф-ролей и бота. Не прошёл проверку — данных туда нет,
-  никакого fallback в корень канала или «куда-нибудь».
-- Если ID не заданы, бот создаёт свой управляемый приватный лог-центр
-  (закрыт для @everyone, открыт боту и STAFF_ROLE_IDS) и запоминает ID
-  созданных объектов в bot_state. Управляемый канал принадлежит боту,
-  поэтому дрейф прав чинится принудительно и заметно.
+Два режима:
+
+- **Управляемый (по умолчанию, LOG_CHANNEL_ID пуст).** Бот создаёт приватную
+  категорию LOG_CATEGORY_NAME и внутри неё отдельный канал на каждый раздел
+  (заявки, решения, afk, обзвоны, статистика, ошибки, аудит). Категория и
+  каналы закрыты для @everyone и открыты боту и STAFF_ROLE_IDS, их ID
+  хранятся в bot_state. Права принадлежат боту, поэтому дрейф настроек
+  чинится принудительно и заметно.
+- **Legacy (задан LOG_CHANNEL_ID).** Один внешний канал, разделы живут в его
+  ветках. Канал и ветки проверяются на тип, принадлежность серверу и
+  приватность: @everyone без просмотра, доступ только у стафф-ролей и бота.
+  Не прошёл проверку - данных туда нет, никакого fallback «куда-нибудь».
+
+В раздел ошибок бот дополнительно пингует ответственных (роли владельцев из
+.env и владельца сервера), а при создании канала ошибок публикует памятку
+о том, как оформлять баг-репорт.
 
 Устойчивость к архивации: ветка ищется не только среди
 активных (``channel.threads``), но и среди архивированных — через
@@ -107,7 +115,7 @@ def _record_delivery(outcome: str, key: str, detail: str = "") -> None:
 
 
 def _private_overwrites(guild):
-    """Права для лог-канала: приватный, доступен боту и стафф-ролям."""
+    """Права для лог-канала и категории: доступ только боту и стафф-ролям."""
     overwrites = {
         guild.default_role: discord.PermissionOverwrite(view_channel=False),
         guild.me: discord.PermissionOverwrite(view_channel=True, send_messages=True),
@@ -257,8 +265,99 @@ async def _repair_managed_channel(guild, channel) -> bool:
     return True
 
 
+async def _resolve_managed_category(guild):
+    """Категория логов: сохранённая, с починкой прав, иначе создаётся заново."""
+    state_key = f"log_category:{getattr(guild, 'id', 0)}"
+    stored = await state_db.async_get_state(state_key)
+    if stored and stored.isdigit():
+        category = await _fetch_guild_channel(guild, int(stored))
+        if isinstance(category, discord.CategoryChannel):
+            if category.permissions_for(guild.default_role).view_channel:
+                try:
+                    await category.edit(overwrites=_private_overwrites(guild))
+                    logger.warning(
+                        f"logcenter: права категории логов {category.id} приведены "
+                        "к приватным (обнаружен дрейф настроек сервера)"
+                    )
+                except (discord.Forbidden, discord.HTTPException) as error:
+                    logger.error(
+                        "logcenter: категория логов публична, починить права не удалось "
+                        f"({type(error).__name__})"
+                    )
+                    return None
+            return category
+        await state_db.async_delete_state(state_key)
+
+    category = await guild.create_category(
+        config.LOG_CATEGORY_NAME, overwrites=_private_overwrites(guild)
+    )
+    await state_db.async_set_state(state_key, str(category.id))
+    logger.info(f"Создал приватную категорию логов «{config.LOG_CATEGORY_NAME}»")
+    return category
+
+
+def _find_channel_by_name(category, name: str):
+    """Существующий канал раздела внутри категории (защита от дублей)."""
+    for channel in getattr(category, "channels", []) or []:
+        if isinstance(channel, discord.TextChannel) and channel.name == name:
+            return channel
+    return None
+
+
+async def _announce_errors_guide(channel) -> None:
+    """Памятка про баг-репорты в новом канале ошибок."""
+    try:
+        message = await channel.send(config.LOG_ERRORS_GUIDE, allowed_mentions=mentions_for())
+        await message.pin()
+    except (discord.Forbidden, discord.HTTPException) as error:
+        logger.warning(
+            f"logcenter outcome=guide_failed channel_id={getattr(channel, 'id', None)} "
+            f"error_type={type(error).__name__}"
+        )
+
+
+async def _resolve_managed_channel(guild, key: str):
+    """Канал раздела логов внутри управляемой категории."""
+    state_key = f"log_channel:{getattr(guild, 'id', 0)}:{key}"
+    name = config.LOG_SECTION_NAMES.get(key, key)
+
+    stored = await state_db.async_get_state(state_key)
+    if stored and stored.isdigit():
+        channel = await _fetch_guild_channel(guild, int(stored))
+        if channel is not None:
+            if not audit_channel_privacy(guild, channel):
+                return channel
+            if await _repair_managed_channel(guild, channel):
+                return channel
+            return None
+        await state_db.async_delete_state(state_key)
+
+    category = await _resolve_managed_category(guild)
+    if category is None:
+        return None
+
+    existing = _find_channel_by_name(category, name)
+    if existing is not None:
+        if audit_channel_privacy(guild, existing) and not await _repair_managed_channel(
+            guild, existing
+        ):
+            return None
+        await state_db.async_set_state(state_key, str(existing.id))
+        logger.info(f"logcenter outcome=reused_channel key={key} channel_id={existing.id}")
+        return existing
+
+    channel = await guild.create_text_channel(
+        name, category=category, overwrites=_private_overwrites(guild)
+    )
+    await state_db.async_set_state(state_key, str(channel.id))
+    logger.info(f"Создал приватный канал логов «{name}» в категории «{category.name}»")
+    if key == LOG_KEY_ERRORS:
+        await _announce_errors_guide(channel)
+    return channel
+
+
 async def _resolve_log_channel(guild):
-    """Лог-канал: внешний по LOG_CHANNEL_ID (строгая проверка) или управляемый."""
+    """Внешний лог-канал по LOG_CHANNEL_ID (только legacy-режим веток)."""
     if config.LOG_CHANNEL_ID:
         channel = await _fetch_guild_channel(guild, config.LOG_CHANNEL_ID)
         if channel is None:
@@ -273,36 +372,23 @@ async def _resolve_log_channel(guild):
             return None
         return channel
 
-    # Управляемый канал: ищем сохранённый ID, чиним права при дрейфе,
-    # отсутствующий — создаём приватным.
-    state_key = f"log_channel:{getattr(guild, 'id', 0)}"
-    stored = await state_db.async_get_state(state_key)
-    if stored and stored.isdigit():
-        channel = await _fetch_guild_channel(guild, int(stored))
-        if channel is not None:
-            if not audit_channel_privacy(guild, channel):
-                return channel
-            if await _repair_managed_channel(guild, channel):
-                return channel
-            return None
-        await state_db.async_delete_state(state_key)
-
-    channel = await guild.create_text_channel(
-        config.LOG_CHANNEL_NAME, overwrites=_private_overwrites(guild)
-    )
-    await state_db.async_set_state(state_key, str(channel.id))
-    logger.info(f"Создал приватный лог-канал «{config.LOG_CHANNEL_NAME}»")
-    return channel
+    return None
 
 
-async def _resolve_thread(guild, key: str):
-    """Сериализует поиск/создание одной ветки, исключая ветки-дубликаты."""
+async def _resolve_destination(guild, key: str):
+    """Сериализует поиск/создание точки лога, исключая дубли каналов и веток."""
     async with _thread_resolve_lock(guild, key):
+        if not config.LOG_CHANNEL_ID:
+            return await _resolve_managed_channel(guild, key)
         return await _resolve_thread_unlocked(guild, key)
 
 
+# Совместимость со старым именем.
+_resolve_thread = _resolve_destination
+
+
 async def _resolve_thread_unlocked(guild, key: str):
-    """Ветка логов: внешняя по LOG_THREAD_*_ID (строгая проверка) или управляемая."""
+    """Ветка логов в legacy-режиме: внешняя по LOG_THREAD_*_ID или созданная ботом."""
     channel = await _resolve_log_channel(guild)
     if channel is None or not isinstance(channel, discord.TextChannel):
         return None
@@ -362,7 +448,9 @@ async def _resolve_thread_unlocked(guild, key: str):
         auto_archive_duration=MAX_AUTO_ARCHIVE,
     )
     await state_db.async_set_state(state_key, str(thread.id))
-    logger.info(f"Создал ветку логов «{name}» в канале «{config.LOG_CHANNEL_NAME}»")
+    logger.info(f"Создал ветку логов «{name}» в канале «{channel.name}»")
+    if key == LOG_KEY_ERRORS:
+        await _announce_errors_guide(thread)
     return thread
 
 
@@ -400,6 +488,46 @@ async def validate_log_center_config(guild) -> list[str]:
     return problems
 
 
+def _error_ping_targets(guild) -> tuple[list[int], list[int]]:
+    """Роли и пользователи, которых зовём при ошибке бота."""
+    if not config.LOG_ERROR_PING_ENABLED:
+        return [], []
+    role_ids = [role_id for role_id in (config.ROLE_OWNER_ID, config.ROLE_DEP_OWNER_ID) if role_id]
+    user_ids = []
+    if config.LOG_ERROR_PING_GUILD_OWNER:
+        owner_id = getattr(guild, "owner_id", None)
+        if owner_id:
+            user_ids.append(int(owner_id))
+    return role_ids, user_ids
+
+
+def _with_error_ping(guild, key: str, content: str | None) -> str | None:
+    """Дописывает к сообщению об ошибке упоминание ответственных."""
+    if key != LOG_KEY_ERRORS:
+        return content
+    role_ids, user_ids = _error_ping_targets(guild)
+    if not role_ids and not user_ids:
+        return content
+    mentions = " ".join(
+        [f"<@&{role_id}>" for role_id in role_ids] + [f"<@{user_id}>" for user_id in user_ids]
+    )
+    header = config.LOG_ERROR_PING_TEXT.format(mentions=mentions)
+    return f"{header}\n{content}" if content else header
+
+
+def _allowed_mentions_for(guild, key: str):
+    """Пинги разрешены только в разделе ошибок и только ответственным."""
+    if key != LOG_KEY_ERRORS:
+        return mentions_for()
+    role_ids, user_ids = _error_ping_targets(guild)
+    if not role_ids and not user_ids:
+        return mentions_for()
+    return mentions_for(
+        roles=[discord.Object(id=role_id) for role_id in role_ids],
+        users=[discord.Object(id=user_id) for user_id in user_ids],
+    )
+
+
 async def send_to_log(
     guild,
     key: str,
@@ -420,8 +548,10 @@ async def send_to_log(
     if guild is None:
         return None
 
+    content = _with_error_ping(guild, key, content)
+
     try:
-        destination = await _resolve_thread(guild, key)
+        destination = await _resolve_destination(guild, key)
     except (discord.Forbidden, discord.HTTPException) as error:
         _record_delivery("failed", key, f"resolve_{type(error).__name__}")
         if raise_http_errors:
@@ -442,7 +572,10 @@ async def send_to_log(
 
     try:
         message = await destination.send(
-            content=content, embed=embed, files=files, allowed_mentions=mentions_for()
+            content=content,
+            embed=embed,
+            files=files,
+            allowed_mentions=_allowed_mentions_for(guild, key),
         )
     except discord.Forbidden:
         _record_delivery("failed", key, "нет прав на отправку в ветку лог-центра")

@@ -446,6 +446,65 @@ class TestAfkSetModalSubmit(unittest.IsolatedAsyncioTestCase):
         interaction.response.send_message.assert_awaited_once()
         self.assertTrue(mock_set.await_args.kwargs["nick_applied"])
 
+    async def test_submit_warns_when_nickname_not_changed(self):
+        """Владельцу сервера ник не сменить: участник должен об этом узнать."""
+        member = MagicMock()
+        member.id = 456
+        member.nick = "Владелец"
+        member.edit = AsyncMock()
+        modal = AfkSetModal(member, 123, MagicMock())
+        modal.reason = MagicMock()
+        modal.reason.value = "обед"
+        modal.duration = MagicMock()
+        modal.duration.value = "1 час"
+
+        interaction = MagicMock()
+        interaction.response = MagicMock()
+        interaction.response.send_message = AsyncMock()
+
+        with patch("afk.views.async_get_afk_user", new_callable=AsyncMock, return_value=None):
+            with patch(
+                "afk.views.async_set_afk",
+                new_callable=AsyncMock,
+                return_value=AfkSetResult(created=True),
+            ):
+                with patch(
+                    "afk.views.add_afk_nickname", new_callable=AsyncMock, return_value=False
+                ):
+                    with patch("afk.views.send_to_log", new_callable=AsyncMock):
+                        await modal.on_submit(interaction)
+
+        text = interaction.response.send_message.await_args.args[0]
+        self.assertIn(config.AFK_NICK_NOT_APPLIED_NOTE, text)
+
+    async def test_submit_without_warning_when_nickname_changed(self):
+        member = MagicMock()
+        member.id = 456
+        member.nick = "[AFK] Игрок"
+        member.edit = AsyncMock()
+        modal = AfkSetModal(member, 123, MagicMock())
+        modal.reason = MagicMock()
+        modal.reason.value = "обед"
+        modal.duration = MagicMock()
+        modal.duration.value = "1 час"
+
+        interaction = MagicMock()
+        interaction.response = MagicMock()
+        interaction.response.send_message = AsyncMock()
+
+        with patch("afk.views.async_get_afk_user", new_callable=AsyncMock, return_value=None):
+            with patch(
+                "afk.views.async_set_afk",
+                new_callable=AsyncMock,
+                return_value=AfkSetResult(created=True),
+            ):
+                with patch("afk.views.add_afk_nickname", new_callable=AsyncMock, return_value=True):
+                    with patch("afk.views.send_to_log", new_callable=AsyncMock):
+                        await modal.on_submit(interaction)
+
+        text = interaction.response.send_message.await_args.args[0]
+        self.assertNotIn(config.AFK_NICK_NOT_APPLIED_NOTE, text)
+
     async def test_submit_default_reason(self):
         member = MagicMock()
         member.id = 456

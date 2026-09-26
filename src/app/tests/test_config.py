@@ -61,6 +61,7 @@ class TestConfig(unittest.TestCase):
 
     def test_channel_names(self):
         self.assertIsInstance(config.LOG_CHANNEL_NAME, str)
+        self.assertIsInstance(config.LOG_CATEGORY_NAME, str)
         self.assertIsInstance(config.VOICE_CHANNELS, list)
         self.assertEqual(len(config.VOICE_CHANNELS), 3)
         for ch in config.VOICE_CHANNELS:
@@ -74,7 +75,32 @@ class TestConfig(unittest.TestCase):
 
     def test_dm_message(self):
         self.assertIsInstance(config.DM_MESSAGE, str)
-        self.assertIn("FAMQCORE", config.DM_MESSAGE)
+        self.assertIn(config.FAMILY_NAME, config.DM_MESSAGE)
+
+    def test_family_name_is_used_in_texts(self):
+        """Название семьи задаётся одной переменной и подставляется в тексты."""
+        self.assertIsInstance(config.FAMILY_NAME, str)
+        self.assertTrue(config.FAMILY_NAME)
+        self.assertIn(config.FAMILY_NAME, config.FAMQCORE_EMBED_TITLE)
+        self.assertIn(config.FAMILY_NAME, config.TICKETS_CATEGORY_NAME)
+
+    def test_log_sections_cover_all_keys(self):
+        keys = {
+            config.LOG_KEY_TICKETS,
+            config.LOG_KEY_DECISIONS,
+            config.LOG_KEY_AFK,
+            config.LOG_KEY_CALLS,
+            config.LOG_KEY_STATS,
+            config.LOG_KEY_ERRORS,
+            config.LOG_KEY_AUDIT,
+        }
+        self.assertEqual(set(config.LOG_SECTION_NAMES), keys)
+        self.assertIs(config.LOG_THREAD_NAMES, config.LOG_SECTION_NAMES)
+
+    def test_error_ping_settings(self):
+        self.assertIsInstance(config.LOG_ERROR_PING_ENABLED, bool)
+        self.assertIn("{mentions}", config.LOG_ERROR_PING_TEXT)
+        self.assertIn("correlation_id", config.LOG_ERRORS_GUIDE)
 
     def test_ticket_titles(self):
         self.assertIsInstance(config.TICKET_RP_TITLE, str)
@@ -85,7 +111,7 @@ class TestConfig(unittest.TestCase):
     def test_famqcore_embed(self):
         self.assertIsInstance(config.FAMQCORE_EMBED_TITLE, str)
         self.assertIsInstance(config.FAMQCORE_EMBED_DESCRIPTION, str)
-        self.assertIn("FAMQCORE", config.FAMQCORE_EMBED_TITLE)
+        self.assertIn(config.FAMILY_NAME, config.FAMQCORE_EMBED_TITLE)
 
     def test_ticket_forms_are_structured(self):
         self.assertEqual(len(config.TICKET_FORMS), 2)
